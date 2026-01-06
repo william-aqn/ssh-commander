@@ -456,7 +456,7 @@ public class SshVerticle extends AbstractVerticle {
             DOCKER_CONTAINERS_LIST, new String[]{"GET", "/containers/json?all=true"},
             DOCKER_CONTAINER_STATS, new String[]{"GET", "/containers/%s/stats?stream=false"},
             DOCKER_CONTAINER_RESTART, new String[]{"POST", "/containers/%s/restart"},
-            DOCKER_CONTAINER_LOGS, new String[]{"GET", "/containers/%s/logs?stdout=true&stderr=true&tail=200"}
+            DOCKER_CONTAINER_LOGS, new String[]{"GET", "/containers/%s/logs?stdout=true&stderr=true&timestamps=%s&tail=%s"}
         );
 
         endpoints.forEach((address, params) -> {
@@ -469,7 +469,14 @@ public class SshVerticle extends AbstractVerticle {
                         message.fail(400, "Invalid container ID format");
                         return;
                     }
-                    path = String.format(path, containerId);
+                    if (address.equals(DOCKER_CONTAINER_LOGS)) {
+                        Object tailObj = body.getValue("tail");
+                        String tail = tailObj != null ? tailObj.toString() : "200";
+                        boolean timestamps = body.getBoolean("timestamps", false);
+                        path = String.format(path, containerId, timestamps, tail);
+                    } else {
+                        path = String.format(path, containerId);
+                    }
                 }
                 dispatchDockerRequest(body.getString("sessionId"), body.getString(SESSION_USER_ID), params[0], path, null, message);
             });
@@ -917,11 +924,13 @@ public class SshVerticle extends AbstractVerticle {
         boolean cacheable = "GET".equalsIgnoreCase(method);
         String cacheKey = serverId + ":" + method + ":" + path + (body != null ? ":" + body : "");
 
+        boolean isLogRequest = path.contains("/logs?");
+
         if (cacheable) {
             JsonObject cached = dockerCache.get(cacheKey);
             if (cached != null && System.currentTimeMillis() - cached.getLong("timestamp") < 3000) {
                 logger.debug("Returning cached Docker API response for server {}: {} {}", serverId, method, path);
-                replyWithDockerData(message, cached.getString("data"));
+                replyWithDockerData(message, cached.getString("data"), !isLogRequest);
                 return;
             }
 
@@ -930,7 +939,7 @@ public class SshVerticle extends AbstractVerticle {
                 logger.debug("Collapsing Docker API request for server {}: {} {}", serverId, method, path);
                 pending.onComplete(ar -> {
                     if (ar.succeeded()) {
-                        replyWithDockerData(message, ar.result());
+                        replyWithDockerData(message, ar.result(), !isLogRequest);
                     } else {
                         message.fail(500, ar.cause().getMessage());
                     }
@@ -951,7 +960,7 @@ public class SshVerticle extends AbstractVerticle {
         }
 
         logger.debug("Executing Docker API request: {} {} on server {}", method, path, serverId);
-        vertx.<String>executeBlocking(() -> {
+        vertx.<byte[]>executeBlocking(() -> {
             if (!dockerApiSemaphore.tryAcquire(15, TimeUnit.SECONDS)) {
                 throw new RuntimeException("Превышен лимит одновременных запросов к Docker API. Пожалуйста, подождите.");
             }
@@ -960,8 +969,9 @@ public class SshVerticle extends AbstractVerticle {
                     throw new RuntimeException("SSH session is not connected");
                 }
                 ChannelExec channel = (ChannelExec) jschSession.openChannel("exec");
-                String command = String.format("curl -s --max-time 15 -X %s --unix-socket /var/run/docker.sock http://localhost%s", 
-                        ShellUtils.sanitize(method), ShellUtils.sanitize(path));
+                String fullUrl = "http://localhost" + path;
+                String command = String.format("curl -s --max-time 15 -X %s --unix-socket /var/run/docker.sock %s", 
+                        ShellUtils.sanitize(method), ShellUtils.sanitize(fullUrl));
                 channel.setCommand(command);
                 InputStream in = channel.getInputStream();
                 InputStream err = channel.getErrStream();
@@ -982,7 +992,7 @@ public class SshVerticle extends AbstractVerticle {
                     if (errorMsg.isEmpty()) errorMsg = "Exit status " + exitStatus;
                     throw new RuntimeException("Docker API call failed: " + errorMsg);
                 } else {
-                    return new String(responseBytes);
+                    return responseBytes;
                 }
             } catch (Exception e) {
                 logger.error("Docker API request failed: {} {} on server {}", method, path, serverId, e);
@@ -991,36 +1001,76 @@ public class SshVerticle extends AbstractVerticle {
                 dockerApiSemaphore.release();
             }
         }).onComplete(res -> {
-            if (cacheable) {
-                pendingDockerRequests.remove(cacheKey);
-                if (res.succeeded()) {
-                    dockerCache.put(cacheKey, new JsonObject().put("data", res.result()).put("timestamp", System.currentTimeMillis()));
-                    promise.complete(res.result());
-                } else {
-                    promise.fail(res.cause());
-                }
-            }
-
             if (res.succeeded()) {
-                replyWithDockerData(message, res.result());
+                byte[] bytes = res.result();
+                String processed = isLogRequest ? processDockerLogs(bytes) : new String(bytes, StandardCharsets.UTF_8);
+
+                if (cacheable) {
+                    pendingDockerRequests.remove(cacheKey);
+                    dockerCache.put(cacheKey, new JsonObject().put("data", processed).put("timestamp", System.currentTimeMillis()));
+                    promise.complete(processed);
+                }
+                replyWithDockerData(message, processed, !isLogRequest);
             } else {
+                if (cacheable) pendingDockerRequests.remove(cacheKey);
+                promise.fail(res.cause());
                 message.fail(500, res.cause().getMessage());
             }
         });
     }
 
-    private void replyWithDockerData(io.vertx.core.eventbus.Message<JsonObject> message, String result) {
+    private String processDockerLogs(byte[] raw) {
+        if (raw == null || raw.length < 8) return raw != null ? new String(raw, StandardCharsets.UTF_8) : "";
+        
+        // Docker multiplexed stream header: [8]byte{type, 0, 0, 0, size1, size2, size3, size4}
+        if (raw[1] != 0 || raw[2] != 0 || raw[3] != 0) {
+            return new String(raw, StandardCharsets.UTF_8);
+        }
+
+        try (java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+            int i = 0;
+            while (i + 8 <= raw.length) {
+                int size = 0;
+                for (int j = 0; j < 4; j++) {
+                    size = (size << 8) | (raw[i + 4 + j] & 0xFF);
+                }
+                i += 8;
+                if (i + size <= raw.length) {
+                    out.write(raw, i, size);
+                    i += size;
+                } else {
+                    out.write(raw, i, raw.length - i);
+                    break;
+                }
+            }
+            return out.toString(StandardCharsets.UTF_8.name());
+        } catch (Exception e) {
+            return new String(raw, StandardCharsets.UTF_8);
+        }
+    }
+
+    private void replyWithDockerData(io.vertx.core.eventbus.Message<JsonObject> message, String result, boolean isJson) {
+        if (result == null) {
+            message.reply(new JsonObject().put("status", "ok").put("data", isJson ? new JsonObject() : ""));
+            return;
+        }
+
+        if (!isJson) {
+            message.reply(new JsonObject().put("status", "ok").put("data", result));
+            return;
+        }
+
         try {
-            String trimmed = result != null ? result.trim() : "";
+            String trimmed = result.trim();
             if (trimmed.startsWith("[")) {
                 message.reply(new JsonObject().put("status", "ok").put("data", new JsonArray(trimmed)));
             } else if (trimmed.startsWith("{")) {
                 message.reply(new JsonObject().put("status", "ok").put("data", new JsonObject(trimmed)));
             } else {
-                message.reply(new JsonObject().put("status", "ok").put("data", trimmed));
+                message.reply(new JsonObject().put("status", "ok").put("data", result));
             }
         } catch (Exception e) {
-            message.reply(new JsonObject().put("status", "ok").put("raw", result));
+            message.reply(new JsonObject().put("status", "ok").put("data", result));
         }
     }
 

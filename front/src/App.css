@@ -1112,3 +1112,206 @@ html, body, #root {
   margin: 10px;
   border-radius: 4px;
 }
+
+/* Docker View Additional Styles */
+.docker-view {
+  padding: 15px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.log-container-wrapper {
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 4px;
+  margin: 5px 0 15px 0;
+  overflow: hidden;
+}
+
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #222;
+  border-bottom: 1px solid #333;
+  font-size: 13px;
+  color: #ccc;
+}
+
+.log-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.log-limit-input {
+  width: 70px;
+  background: #333;
+  border: 1px solid #444;
+  color: #fff;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.log-action-btn {
+  background: #444;
+  border: none;
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.log-action-btn:hover {
+  background: #555;
+}
+
+.log-container {
+  background: #000;
+  color: #00ff00;
+  font-family: 'Consolas', 'Monaco', monospace;
+  padding: 10px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-resize-handle {
+  height: 6px;
+  background: #222;
+  cursor: ns-resize;
+  border-top: 1px solid #333;
+  width: 100%;
+  transition: background 0.2s;
+}
+
+.log-resize-handle:hover {
+  background: #444;
+}
+
+.chart-td {
+  width: 120px;
+  padding: 4px !important;
+}
+
+.mini-chart-container {
+  width: 120px;
+  height: 30px;
+  background: #000;
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.large-chart-container {
+  width: 100%;
+  height: 100%;
+}
+
+.no-chart-data {
+  width: 120px;
+  height: 30px;
+  background: #111;
+  border: 1px dashed #333;
+  border-radius: 4px;
+}
+
+.chart-zoom-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  backdrop-filter: blur(4px);
+}
+
+.chart-zoom-modal {
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 8px;
+  width: 80%;
+  max-width: 900px;
+  height: 500px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+}
+
+.chart-zoom-header {
+  padding: 15px 20px;
+  border-bottom: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.chart-zoom-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #007acc;
+}
+
+.close-zoom-btn {
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 24px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.close-zoom-btn:hover {
+  color: #fff;
+}
+
+.chart-zoom-body {
+  flex: 1;
+  padding: 20px;
+  background: #000;
+  min-height: 0;
+}
+
+.chart-zoom-footer {
+  padding: 15px 20px;
+  border-top: 1px solid #333;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.download-button {
+  background: #007acc;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: bold;
+}
+
+.download-button:hover {
+  background: #008ae6;
+}
+
+.docker-table tr.expanded td {
+  border-bottom: none;
+}
+
+.docker-table tr.log-row td {
+  padding-top: 0;
+}
+
+.docker-actions button.active {
+  background: #007acc;
+  color: white;
+}
