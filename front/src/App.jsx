@@ -292,6 +292,7 @@ function App() {
   }, [isDragging, resizing, widgetPos, widgetSize]);
 
   const handleMouseDown = (e) => {
+    if (e.button !== 0) return; // Only left click for dragging
     if (e.target.closest('button') || e.target.closest('.no-drag')) return;
     setIsDragging(true);
     dragStartOffset.current = {
@@ -1249,10 +1250,20 @@ function App() {
           <div 
             onMouseDown={handleMouseDown}
             onDoubleClick={handleTitleDoubleClick}
+            onAuxClick={(e) => {
+              if (e.button === 1 && isSidebarCollapsed) {
+                setIsSidebarCollapsed(false);
+              }
+            }}
             className="terminal-header"
           >
             <button 
                 onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+                onAuxClick={(e) => {
+                    if (e.button === 1) {
+                        setIsSidebarCollapsed(false);
+                    }
+                }}
                 className="sidebar-toggle no-drag"
                 title={isSidebarCollapsed ? "Развернуть список" : "Свернуть список"}
                 style={isEmpty ? { visibility: 'hidden' } : {}}

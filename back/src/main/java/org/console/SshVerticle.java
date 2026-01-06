@@ -243,7 +243,6 @@ public class SshVerticle extends AbstractVerticle {
                                 message.fail(410, "Docker view closed");
                                 return;
                             }
-                            restorableSessions.remove(sessionId);
                             message.reply(new JsonObject().put("status", "connected"));
                             notifySessionCreated(userId, sessionId, serverId, config.getString("name", serverConfigs.containsKey(serverId) ? serverConfigs.get(serverId).getString("name") : serverId), isDocker, config.getString("viewMode", "terminal"));
                         })
@@ -777,6 +776,7 @@ public class SshVerticle extends AbstractVerticle {
                 String cmd = c.getString("command");
                 return isDockerCommand(cmd) == isDocker;
             })
+            .filter(c -> !sessions.containsKey(c.getString("sessionId")))
             .count();
 
         if (currentActive + currentRestorable >= maxSessions) {
