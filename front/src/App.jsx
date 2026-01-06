@@ -102,6 +102,11 @@ function App() {
         const path = params.get('path');
         const serverId = params.get('server');
         
+        // Simple validation
+        const validModes = ['terminal', 'docker', 'files'];
+        const safeMode = validModes.includes(mode) ? mode : null;
+        const safePath = (path && !path.includes('<script')) ? path : null;
+        
         skipUrlSync.current = true;
         if (tabId) {
             setActiveTab(tabId);
@@ -109,10 +114,10 @@ function App() {
             setTabs(prev => prev.map(t => {
                 if (t.id === tabId) {
                     const updates = {};
-                    if (mode && t.viewMode !== mode) updates.viewMode = mode;
+                    if (safeMode && t.viewMode !== safeMode) updates.viewMode = safeMode;
                     if (serverId && t.serverId !== serverId) updates.serverId = serverId;
-                    if (mode === 'files') {
-                        const targetPath = path || '.';
+                    if (safeMode === 'files') {
+                        const targetPath = safePath || '.';
                         if (t.currentPath !== targetPath) updates.currentPath = targetPath;
                     }
                     return Object.keys(updates).length > 0 ? { ...t, ...updates } : t;
@@ -186,6 +191,8 @@ function App() {
         setTabs([]);
         setActiveTab(null);
         setSessionsLoaded(false);
+        setHistory([]);
+        localStorage.removeItem('ssh_history');
         eb.close();
       });
   };
@@ -502,10 +509,10 @@ function App() {
         const { sessionId, viewMode, serverId } = msg.body;
         setTabs(prev => {
           const currentTab = prev.find(t => t.id === sessionId);
-          const wasDocker = currentTab && currentTab.viewMode === 'docker';
+          const oldViewMode = currentTab ? currentTab.viewMode : null;
 
           const idsToRemove = [];
-          if (viewMode === 'terminal' && wasDocker) {
+          if ((oldViewMode === 'docker' || oldViewMode === 'files') && viewMode !== oldViewMode) {
             prev.forEach(t => {
               if (t.serverId === serverId && t.isDocker) {
                 idsToRemove.push(t.id);
@@ -684,7 +691,51 @@ function App() {
     return () => clearInterval(interval);
   }, [tabs, connected, detachedSessionId]);
 
-  const createSession = (serverId, command = null, customName = null, viewMode = 'terminal', initialPath = '.') => {
+  const refreshSessions = () => {
+    if (eb.state !== EventBus.OPEN) return;
+    eb.send('ssh.session.list', {}, (err, res) => {
+      if (!err && res && res.body) {
+        console.log('Refreshing sessions from backend:', res.body);
+        const backendSessions = res.body.map(s => ({
+          id: s.id,
+          name: s.name || s.serverName || s.id,
+          status: s.status || 'connected',
+          serverId: s.serverId,
+          viewMode: s.viewMode || 'terminal',
+          isDocker: s.isDocker || false,
+          currentPath: '.'
+        }));
+
+        setTabs(prev => {
+          const newTabs = backendSessions.map(bs => {
+            const existing = prev.find(p => p.id === bs.id);
+            if (existing) {
+              return { ...bs, currentPath: existing.currentPath || '.' };
+            }
+            return bs;
+          });
+
+          // Сохраняем сессии в статусе 'connecting' или 'error', которых еще нет в списке с бэкенда
+          const stillPending = prev.filter(p => 
+            (p.status === 'connecting' || p.status === 'error') && !backendSessions.find(bs => bs.id === p.id)
+          );
+
+          return [...newTabs, ...stillPending];
+        });
+      }
+    });
+  };
+
+  const handleSessionError = (sessionId, err) => {
+    setTabs(prev => prev.map(t =>
+      t.id === sessionId ? { ...t, status: 'error', progressMessage: err.message || 'unknown error' } : t
+    ));
+    if (err.message && err.message.includes('Превышен лимит открытых')) {
+      refreshSessions();
+    }
+  };
+
+  const createSession = (serverId, command = null, customName = null, viewMode = 'terminal', initialPath = '.', activate = true) => {
     if (eb.state !== EventBus.OPEN) {
       console.error('Cannot create session: EventBus is not connected');
       return;
@@ -704,9 +755,12 @@ function App() {
         command: command,
         currentPath: initialPath
     }]);
-    setActiveTab(sessionId);
-    setIsTerminalVisible(true);
-    setTabSearch('');
+
+    if (activate) {
+        setActiveTab(sessionId);
+        setIsTerminalVisible(true);
+        setTabSearch('');
+    }
 
     const config = { 
         sessionId, 
@@ -718,9 +772,7 @@ function App() {
     setTimeout(() => {
       eb.send('ssh.session.create', config, (err, res) => {
         if (err) {
-          setTabs(prev => prev.map(t => 
-              t.id === sessionId ? { ...t, status: 'error', progressMessage: err.message || 'unknown error' } : t
-          ));
+          handleSessionError(sessionId, err);
         }
       });
     }, 50); // Даем время на монтирование компонента SshTerminal
@@ -744,9 +796,7 @@ function App() {
     setTimeout(() => {
       eb.send('ssh.session.create', config, (err, res) => {
         if (err) {
-          setTabs(prev => prev.map(t => 
-              t.id === sessionId ? { ...t, status: 'error', progressMessage: err.message || 'unknown error' } : t
-          ));
+          handleSessionError(sessionId, err);
         }
       });
     }, 50);
@@ -761,9 +811,7 @@ function App() {
 
     eb.send('ssh.session.restore', { sessionId }, (err, res) => {
         if (err) {
-            setTabs(prev => prev.map(t => 
-                t.id === sessionId ? { ...t, status: 'error', progressMessage: err.message || 'Ошибка восстановления' } : t
-            ));
+          handleSessionError(sessionId, err);
         }
     });
   };
@@ -817,16 +865,22 @@ function App() {
       }
     }
 
-    setTabs(prev => {
-      const idsToRemove = [];
-      if (viewMode === 'terminal' && (currentTab.viewMode === 'docker' || currentTab.viewMode === 'files')) {
-        prev.forEach(t => {
-          if (t.serverId === currentTab.serverId && t.isDocker) {
-            idsToRemove.push(t.id);
-          }
-        });
-      }
+    const idsToRemove = [];
+    if ((currentTab.viewMode === 'docker' || currentTab.viewMode === 'files') && viewMode !== currentTab.viewMode) {
+      tabs.forEach(t => {
+        if (t.serverId === currentTab.serverId && t.isDocker) {
+          idsToRemove.push(t.id);
+        }
+      });
+    }
 
+    if (idsToRemove.length > 0 && eb.state === EventBus.OPEN) {
+      idsToRemove.forEach(id => {
+        eb.send('ssh.session.terminate', { sessionId: id });
+      });
+    }
+
+    setTabs(prev => {
       const nextTabs = prev.map(t => {
         if (t.id === sessionId) return { ...t, viewMode };
         if ((viewMode === 'docker' || viewMode === 'files') && t.serverId === currentTab.serverId && t.viewMode === viewMode) {
@@ -849,6 +903,22 @@ function App() {
     if (eb.state === EventBus.OPEN) {
       eb.send('ssh.session.viewmode.set', { sessionId, viewMode });
       eb.publish('ssh.session.viewmode.sync', { sessionId, viewMode, serverId: currentTab.serverId });
+    }
+  };
+
+  const handleModeAuxClick = (e, mode) => {
+    if (e.button === 1) { // Middle click
+      e.preventDefault();
+      const currentTab = tabs.find(t => t.id === activeTab);
+      if (!currentTab) return;
+      
+      const existingTab = (mode === 'docker' || mode === 'files') 
+        ? tabs.find(t => t.serverId === currentTab.serverId && t.viewMode === mode)
+        : null;
+
+      if (!existingTab) {
+        createSession(currentTab.serverId, null, null, mode, '.', false);
+      }
     }
   };
 
@@ -1144,14 +1214,17 @@ function App() {
                   <button 
                     className={`header-tab ${activeTabData?.viewMode === 'terminal' ? 'active' : ''}`}
                     onClick={() => setViewMode(activeTab, 'terminal')}
+                    onAuxClick={(e) => handleModeAuxClick(e, 'terminal')}
                   >TERMINAL</button>
                   <button 
                     className={`header-tab ${activeTabData?.viewMode === 'docker' ? 'active' : ''}`}
                     onClick={() => setViewMode(activeTab, 'docker')}
+                    onAuxClick={(e) => handleModeAuxClick(e, 'docker')}
                   >DOCKER</button>
                   <button 
                     className={`header-tab ${activeTabData?.viewMode === 'files' ? 'active' : ''}`}
                     onClick={() => setViewMode(activeTab, 'files')}
+                    onAuxClick={(e) => handleModeAuxClick(e, 'files')}
                   >FILES</button>
                 </div>
               )}

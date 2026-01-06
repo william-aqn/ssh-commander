@@ -10,7 +10,7 @@ const FilesView = ({ sessionId, userId, status, path: pathProp, onRestore, onPat
     const params = new URLSearchParams(window.location.search);
     const urlTab = params.get('tab');
     const urlPath = params.get('path');
-    if (urlTab === sessionId && urlPath) return urlPath;
+    if (urlTab === sessionId && urlPath && !urlPath.includes('<script')) return urlPath;
     return '.';
   });
   const [loading, setLoading] = useState(false);

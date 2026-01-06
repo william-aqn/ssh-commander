@@ -14,7 +14,7 @@ import io.vertx.core.json.JsonObject;
 import io.vertx.redis.client.Command;
 import io.vertx.redis.client.Redis;
 import io.vertx.redis.client.Request;
-import org.console.utils.ConfigUtils;
+import org.console.utils.ShellUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -101,8 +101,8 @@ public class SshVerticle extends AbstractVerticle {
             }
 
             if (serverId != null) {
-                // Если меняем с docker на terminal, закрываем дочерние докер-сессии
-                if ("terminal".equals(viewMode) && "docker".equals(oldViewMode)) {
+                // Если уходим из режима docker или files, закрываем дочерние докер-сессии
+                if (!viewMode.equals(oldViewMode) && ("docker".equals(oldViewMode) || "files".equals(oldViewMode))) {
                     terminateChildDockerSessions(userId, serverId, sessionId);
                 }
 
@@ -465,7 +465,12 @@ public class SshVerticle extends AbstractVerticle {
                 JsonObject body = message.body();
                 String path = params[1];
                 if (path.contains("%s")) {
-                    path = String.format(path, body.getString("containerId"));
+                    String containerId = body.getString("containerId");
+                    if (!ShellUtils.isValidContainerId(containerId)) {
+                        message.fail(400, "Invalid container ID format");
+                        return;
+                    }
+                    path = String.format(path, containerId);
                 }
                 dispatchDockerRequest(body.getString("sessionId"), body.getString(SESSION_USER_ID), params[0], path, null, message);
             });
@@ -491,7 +496,8 @@ public class SshVerticle extends AbstractVerticle {
                 return;
             }
 
-            String command = String.format("ls -la --time-style=long-iso \"%s\"; echo '---DF---'; df -h \"%s\" | tail -n 1", path.replace("\"", "\\\""), path.replace("\"", "\\\""));
+            String sanitizedPath = ShellUtils.sanitize(path);
+            String command = String.format("ls -la --time-style=long-iso %s; echo '---DF---'; df -h %s | tail -n 1", sanitizedPath, sanitizedPath);
             executeCommand(jschSession, command)
                 .onSuccess(output -> {
                     String[] parts = output.split("---DF---");
@@ -531,7 +537,7 @@ public class SshVerticle extends AbstractVerticle {
             String archiveName = "/tmp/archive_" + System.currentTimeMillis() + ".tar.gz";
             StringBuilder sb = new StringBuilder("tar -czf ").append(archiveName);
             for (int i = 0; i < paths.size(); i++) {
-                sb.append(" \"").append(paths.getString(i).replace("\"", "\\\"")).append("\"");
+                sb.append(" ").append(ShellUtils.sanitize(paths.getString(i)));
             }
 
             executeCommand(jschSession, sb.toString())
@@ -559,7 +565,7 @@ public class SshVerticle extends AbstractVerticle {
 
             // Используем du -sh для получения размеров всех объектов в папке
             // || true нужен, так как du возвращает 1, если не нашел какой-то из файлов (например, если папка пустая или нет прав)
-            String command = String.format("cd \"%s\" && (du -sh -- .[!.]* * 2>/dev/null || true)", path.replace("\"", "\\\""));
+            String command = String.format("cd %s && (du -sh -- .[!.]* * 2>/dev/null || true)", ShellUtils.sanitize(path));
             executeCommand(jschSession, command)
                 .onSuccess(output -> {
                     JsonObject sizes = new JsonObject();
@@ -602,7 +608,7 @@ public class SshVerticle extends AbstractVerticle {
                 return;
             }
 
-            String command = String.format("mkdir -p \"%s\"", path.replace("\"", "\\\""));
+            String command = String.format("mkdir -p %s", ShellUtils.sanitize(path));
             executeCommand(jschSession, command)
                 .onSuccess(v -> message.reply(new JsonObject().put("status", "ok")))
                 .onFailure(err -> message.fail(500, err.getMessage()));
@@ -628,7 +634,7 @@ public class SshVerticle extends AbstractVerticle {
 
             StringBuilder sb = new StringBuilder("rm -rf");
             for (int i = 0; i < paths.size(); i++) {
-                sb.append(" \"").append(paths.getString(i).replace("\"", "\\\"")).append("\"");
+                sb.append(" ").append(ShellUtils.sanitize(paths.getString(i)));
             }
 
             executeCommand(jschSession, sb.toString())
@@ -655,7 +661,7 @@ public class SshVerticle extends AbstractVerticle {
                 return;
             }
 
-            String command = String.format("chmod %s \"%s\"", mode, path.replace("\"", "\\\""));
+            String command = String.format("chmod %s %s", ShellUtils.sanitize(mode), ShellUtils.sanitize(path));
             executeCommand(jschSession, command)
                 .onSuccess(v -> message.reply(new JsonObject().put("status", "ok")))
                 .onFailure(err -> message.fail(500, err.getMessage()));
@@ -774,9 +780,9 @@ public class SshVerticle extends AbstractVerticle {
             .count();
 
         if (currentActive + currentRestorable >= maxSessions) {
-            logger.warn("User {} reached {} session limit for server {}: current={}, max={}", 
-                userId, isDocker ? "docker" : "ssh", serverId, currentActive + currentRestorable, maxSessions);
             String type = isDocker ? "докер-сессий" : "терминалов";
+            logger.warn("User {} reached {} session limit for server {}: current={}, max={}, active={}, restorable={}", 
+                userId, isDocker ? "docker" : "ssh", serverId, currentActive + currentRestorable, maxSessions, currentActive, currentRestorable);
             message.fail(403, "Превышен лимит открытых " + type + " для этого сервера (максимум: " + maxSessions + ")");
             return false;
         }
@@ -850,7 +856,7 @@ public class SshVerticle extends AbstractVerticle {
         // Кэшируем в памяти для быстрого доступа
         restorableSessions.put(sessionId, config);
         
-        redis.send(Request.cmd(Command.SET).arg(key).arg(config.encode()))
+        redis.send(Request.cmd(Command.SET).arg(key).arg(config.encode()).arg("EX").arg("86400"))
             .onFailure(err -> logger.error("Failed to save session to Redis", err));
 
         // Добавляем в список порядка
@@ -954,7 +960,8 @@ public class SshVerticle extends AbstractVerticle {
                     throw new RuntimeException("SSH session is not connected");
                 }
                 ChannelExec channel = (ChannelExec) jschSession.openChannel("exec");
-                String command = String.format("curl -s --max-time 15 -X %s --unix-socket /var/run/docker.sock http://localhost%s", method, path);
+                String command = String.format("curl -s --max-time 15 -X %s --unix-socket /var/run/docker.sock http://localhost%s", 
+                        ShellUtils.sanitize(method), ShellUtils.sanitize(path));
                 channel.setCommand(command);
                 InputStream in = channel.getInputStream();
                 InputStream err = channel.getErrStream();
@@ -1195,7 +1202,7 @@ public class SshVerticle extends AbstractVerticle {
                 try {
                     JsonObject config = new JsonObject(res.toString());
                     config.put("viewMode", viewMode);
-                    redis.send(Request.cmd(Command.SET).arg(key).arg(config.encode()));
+                    redis.send(Request.cmd(Command.SET).arg(key).arg(config.encode()).arg("EX").arg("86400"));
                 } catch (Exception e) {
                     logger.error("Failed to update viewMode in Redis for session {}", sessionId, e);
                 }

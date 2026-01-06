@@ -22,6 +22,8 @@ import io.vertx.redis.client.Redis;
 import io.vertx.redis.client.RedisOptions;
 import io.vertx.redis.client.Request;
 import org.console.utils.ConfigUtils;
+import org.console.utils.ShellUtils;
+import org.mindrot.jbcrypt.BCrypt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -105,7 +107,7 @@ public class MainVerticle extends AbstractVerticle {
         String password = body.getString("password");
 
         JsonObject user = users.get(username);
-        if (user != null && password != null && password.equals(user.getString("password"))) {
+        if (user != null && password != null && BCrypt.checkpw(password, user.getString("password"))) {
             String userId = user.getString("id");
             ctx.session().put(SESSION_USER_ID, userId);
             ctx.session().put(SESSION_USERNAME, username);
@@ -140,8 +142,8 @@ public class MainVerticle extends AbstractVerticle {
         String sessionId = ctx.request().getParam("sessionId");
         String path = ctx.request().getParam("path");
 
-        if (sessionId == null || path == null) {
-            ctx.response().setStatusCode(400).end("Missing parameters");
+        if (sessionId == null || path == null || path.contains("..")) {
+            ctx.response().setStatusCode(400).end("Invalid parameters");
             return;
         }
 
@@ -171,7 +173,7 @@ public class MainVerticle extends AbstractVerticle {
                 jschSession = jsch.getSession(config.getString("user"), config.getString("host"), config.getInteger("port", 22));
                 jschSession.setPassword(config.getString("password"));
                 Properties prop = new Properties();
-                prop.put("StrictHostKeyChecking", "no");
+                prop.put("StrictHostKeyChecking", "yes");
                 jschSession.setConfig(prop);
                 jschSession.connect(15000);
 
@@ -179,7 +181,7 @@ public class MainVerticle extends AbstractVerticle {
                 String filename = path.contains("/") ? path.substring(path.lastIndexOf('/') + 1) : path;
                 if (filename.isEmpty()) filename = "download";
 
-                channel.setCommand("cat \"" + path.replace("\"", "\\\"") + "\"");
+                channel.setCommand("cat " + ShellUtils.sanitize(path));
                 InputStream in = channel.getInputStream();
                 channel.connect(15000);
 
@@ -294,7 +296,7 @@ public class MainVerticle extends AbstractVerticle {
                 jschSession = jsch.getSession(config.getString("user"), config.getString("host"), config.getInteger("port", 22));
                 jschSession.setPassword(config.getString("password"));
                 Properties prop = new Properties();
-                prop.put("StrictHostKeyChecking", "no");
+                prop.put("StrictHostKeyChecking", "yes");
                 jschSession.setConfig(prop);
                 jschSession.connect(15000);
 
