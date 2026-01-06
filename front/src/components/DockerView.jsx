@@ -11,7 +11,7 @@ import {
   Legend 
 } from 'recharts';
 
-const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore }) => {
+const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serverName }) => {
   const [containers, setContainers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -172,7 +172,16 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore }) =>
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `container_${name}_logs.txt`;
+    
+    const now = new Date();
+    const day = String(now.getDate()).padStart(2, '0');
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const year = now.getFullYear();
+    const milliseconds = now.getTime();
+    
+    const host = serverName || 'server';
+    a.download = `${host}_${name}_${day}${month}${year}_${milliseconds}.txt`;
+    
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

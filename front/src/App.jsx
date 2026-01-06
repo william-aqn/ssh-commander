@@ -1194,6 +1194,7 @@ function App() {
                     sessionId={detachedSessionId} 
                     userId={userId} 
                     status="connected" 
+                    serverName={availableServers.find(s => s.id === detachedServerId)?.name || detachedServerId}
                     onRestore={() => eb.send('ssh.session.restore', { sessionId: detachedSessionId })}
                     onOpenTerminal={(name, containerId) => createSession(detachedServerId, `docker exec -it ${containerId} sh -c "command -v bash >/dev/null && exec bash || exec sh"`, name)}
                 />
@@ -1449,6 +1450,7 @@ function App() {
                                 sessionId={tab.id} 
                                 userId={userId} 
                                 status={tab.status}
+                                serverName={availableServers.find(s => s.id === tab.serverId)?.name || tab.serverId}
                                 onRestore={() => restoreSession(tab.id)}
                                 onOpenTerminal={(name, containerId) => createSession(tab.serverId, `docker exec -it ${containerId} sh -c "command -v bash >/dev/null && exec bash || exec sh"`, name)}
                             />
