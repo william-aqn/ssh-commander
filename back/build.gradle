@@ -1,0 +1,33 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'org.console'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation platform('io.vertx:vertx-stack-depchain:5.0.6')
+    implementation 'io.vertx:vertx-core'
+    implementation 'io.vertx:vertx-web'
+    implementation 'io.vertx:vertx-redis-client'
+    implementation 'io.vertx:vertx-web-sstore-redis'
+    implementation 'com.github.mwiede:jsch:2.27.7'
+    implementation 'ch.qos.logback:logback-classic:1.5.23'
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+
+    testImplementation 'io.vertx:vertx-junit5'
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+application {
+    mainClass = 'org.console.Main'
+}
+
+test {
+    useJUnitPlatform()
+}

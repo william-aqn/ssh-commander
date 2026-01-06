@@ -1,0 +1,6 @@
+/front/node_modules/
+/front/dist/
+/back/src/main/resources/users.json
+/back/src/main/resources/servers.json
+/file-uploads/
+/.idea/

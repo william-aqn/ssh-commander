@@ -1,0 +1,25 @@
+{
+  "name": "ssh-front",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vertx/eventbus-bridge-client.js": "^1.0.0-3-SNAPSHOT",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "sockjs-client": "^1.6.1",
+    "@xterm/xterm": "^6.0.0",
+    "@xterm/addon-fit": "^0.11.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.2",
+    "vite": "^7.3.0"
+  }
+}
