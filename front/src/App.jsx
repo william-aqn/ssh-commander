@@ -37,7 +37,10 @@ function App() {
     }
   });
   const [isDragging, setIsDragging] = useState(false);
-  const [resizing, setResizing] = useState(null); // 'r', 'b', 'rb'
+  const [resizing, setResizing] = useState(null); // 'r', 'b', 'rb', 'l', 't', 'lt', 'lb', 'rt'
+  const [isMaximized, setIsMaximized] = useState(() => {
+    return localStorage.getItem('ssh_widget_maximized') === 'true';
+  });
   const [detachedTabs, setDetachedTabs] = useState(new Set());
   const [tabSearch, setTabSearch] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -60,6 +63,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('ssh_widget_visible', isTerminalVisible);
   }, [isTerminalVisible]);
+
+  useEffect(() => {
+    localStorage.setItem('ssh_widget_maximized', isMaximized);
+  }, [isMaximized]);
 
   const updateUrl = (sessionId, viewMode, path = null, serverId = null) => {
     if (skipUrlSync.current) return;
@@ -161,6 +168,9 @@ function App() {
   // Check if we are in detached mode
   const urlParams = new URLSearchParams(window.location.search);
   const detachedSessionId = urlParams.get('sessionId');
+  const detachedMode = urlParams.get('mode') || 'terminal';
+  const detachedPath = urlParams.get('path') || '.';
+  const detachedServerId = urlParams.get('serverId') || '';
 
 
   useEffect(() => {
@@ -202,7 +212,7 @@ function App() {
   }, [history]);
 
   const dragStartOffset = useRef({ x: 0, y: 0 });
-  const resizeStartSize = useRef({ width: 0, height: 0, x: 0, y: 0 });
+  const resizeStartSize = useRef({ width: 0, height: 0, x: 0, y: 0, widgetX: 0, widgetY: 0 });
 
   useEffect(() => {
     if (detachedSessionId) {
@@ -231,11 +241,34 @@ function App() {
         
         let newWidth = resizeStartSize.current.width;
         let newHeight = resizeStartSize.current.height;
+        let newX = resizeStartSize.current.widgetX;
+        let newY = resizeStartSize.current.widgetY;
 
-        if (resizing.includes('r')) newWidth = Math.max(400, resizeStartSize.current.width + deltaX);
-        if (resizing.includes('b')) newHeight = Math.max(300, resizeStartSize.current.height + deltaY);
+        if (resizing.includes('r')) {
+          newWidth = Math.max(400, resizeStartSize.current.width + deltaX);
+        }
+        if (resizing.includes('l')) {
+          newWidth = Math.max(400, resizeStartSize.current.width - deltaX);
+          if (newWidth > 400) {
+            newX = resizeStartSize.current.widgetX + deltaX;
+          } else {
+            newX = resizeStartSize.current.widgetX + (resizeStartSize.current.width - 400);
+          }
+        }
+        if (resizing.includes('b')) {
+          newHeight = Math.max(300, resizeStartSize.current.height + deltaY);
+        }
+        if (resizing.includes('t')) {
+          newHeight = Math.max(300, resizeStartSize.current.height - deltaY);
+          if (newHeight > 300) {
+            newY = resizeStartSize.current.widgetY + deltaY;
+          } else {
+            newY = resizeStartSize.current.widgetY + (resizeStartSize.current.height - 300);
+          }
+        }
 
         setWidgetSize({ width: newWidth, height: newHeight });
+        setWidgetPos({ x: newX, y: newY });
       }
     };
     const handleMouseUp = () => {
@@ -275,8 +308,14 @@ function App() {
         width: widgetSize.width,
         height: widgetSize.height,
         x: e.clientX,
-        y: e.clientY
+        y: e.clientY,
+        widgetX: widgetPos.x,
+        widgetY: widgetPos.y
     };
+  };
+
+  const handleTitleDoubleClick = () => {
+    setIsMaximized(!isMaximized);
   };
 
   useEffect(() => {
@@ -299,7 +338,11 @@ function App() {
 
   const detachTab = (e, sessionId) => {
     if (e) e.stopPropagation();
-    const win = window.open(`${window.location.pathname}?sessionId=${sessionId}`, `term_${sessionId}`, 'width=800,height=600');
+    const tab = tabs.find(t => t.id === sessionId);
+    const mode = tab ? tab.viewMode : 'terminal';
+    const path = tab?.currentPath || '.';
+    const serverId = tab?.serverId || '';
+    const win = window.open(`${window.location.pathname}?sessionId=${sessionId}&mode=${mode}&serverId=${serverId}${mode === 'files' ? `&path=${encodeURIComponent(path)}` : ''}`, `term_${sessionId}`, 'width=800,height=600');
     if (win) {
         detachedWindows.current[sessionId] = win;
         setDetachedTabs(prev => new Set(prev).add(sessionId));
@@ -1145,7 +1188,35 @@ function App() {
   if (detachedSessionId) {
     return (
         <div className="terminal-viewport full-screen">
-            <SshTerminal sessionId={detachedSessionId} userId={userId} />
+            {detachedMode === 'docker' ? (
+                <DockerView 
+                    sessionId={detachedSessionId} 
+                    userId={userId} 
+                    status="connected" 
+                    onRestore={() => eb.send('ssh.session.restore', { sessionId: detachedSessionId })}
+                    onOpenTerminal={(name, containerId) => createSession(detachedServerId, `docker exec -it ${containerId} sh -c "command -v bash >/dev/null && exec bash || exec sh"`, name)}
+                />
+            ) : detachedMode === 'files' ? (
+                <FilesView 
+                    sessionId={detachedSessionId} 
+                    userId={userId} 
+                    status="connected" 
+                    path={detachedPath}
+                    onRestore={() => eb.send('ssh.session.restore', { sessionId: detachedSessionId })}
+                    onPathChange={(path) => {
+                        const url = new URL(window.location);
+                        url.searchParams.set('path', path);
+                        window.history.replaceState({}, '', url);
+                    }}
+                />
+            ) : (
+                <SshTerminal 
+                    sessionId={detachedSessionId} 
+                    userId={userId} 
+                    status="connected" 
+                    onRestore={() => eb.send('ssh.session.restore', { sessionId: detachedSessionId })}
+                />
+            )}
         </div>
     );
   }
@@ -1167,7 +1238,7 @@ function App() {
 
       {isTerminalVisible && (
         <div 
-          className={`terminal-window ${isEmpty ? 'is-empty' : ''}`}
+          className={`terminal-window ${isEmpty ? 'is-empty' : ''} ${isMaximized && !isEmpty ? 'is-maximized' : ''}`}
           style={{
             width: isEmpty ? '250px' : `${widgetSize.width}px`,
             height: isEmpty ? '450px' : `${widgetSize.height}px`,
@@ -1177,6 +1248,7 @@ function App() {
           {/* Header (Drag Handle) */}
           <div 
             onMouseDown={handleMouseDown}
+            onDoubleClick={handleTitleDoubleClick}
             className="terminal-header"
           >
             <button 
@@ -1425,7 +1497,7 @@ function App() {
           </div>
 
           {/* Resize handles */}
-          {!isEmpty && (
+          {!isEmpty && !isMaximized && (
             <>
               <div 
                 onMouseDown={(e) => handleResizeDown(e, 'r')}
@@ -1436,8 +1508,28 @@ function App() {
                 className="resize-handle resize-handle-b"
               />
               <div 
+                onMouseDown={(e) => handleResizeDown(e, 'l')}
+                className="resize-handle resize-handle-l"
+              />
+              <div 
+                onMouseDown={(e) => handleResizeDown(e, 't')}
+                className="resize-handle resize-handle-t"
+              />
+              <div 
                 onMouseDown={(e) => handleResizeDown(e, 'rb')}
                 className="resize-handle resize-handle-rb"
+              />
+              <div 
+                onMouseDown={(e) => handleResizeDown(e, 'lt')}
+                className="resize-handle resize-handle-lt"
+              />
+              <div 
+                onMouseDown={(e) => handleResizeDown(e, 'lb')}
+                className="resize-handle resize-handle-lb"
+              />
+              <div 
+                onMouseDown={(e) => handleResizeDown(e, 'rt')}
+                className="resize-handle resize-handle-rt"
               />
             </>
           )}
