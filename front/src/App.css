@@ -855,6 +855,11 @@ html, body, #root {
   border-color: #666;
 }
 
+.docker-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .docker-loading, .docker-error {
   display: flex;
   align-items: center;
@@ -941,6 +946,11 @@ html, body, #root {
   background: #333;
   color: #ccc;
   border-color: #666;
+}
+
+.add-env-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Modal Resizer Styles */
@@ -1553,6 +1563,11 @@ html, body, #root {
   background: #008ae6;
 }
 
+.download-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .docker-table tr.expanded td {
   border-bottom: none;
 }
@@ -1564,4 +1579,19 @@ html, body, #root {
 .docker-actions button.active {
   background: #007acc;
   color: white;
+}
+
+.modal-loader-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  backdrop-filter: blur(2px);
+  border-radius: 4px;
 }

@@ -25,6 +25,7 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
   const [zoomedContainerId, setZoomedContainerId] = useState(null);
   const [editingEnv, setEditingEnv] = useState(null); // { containerId, env: [], name }
   const [envLoading, setEnvLoading] = useState(false);
+  const [loadingEnvContainerId, setLoadingEnvContainerId] = useState(null);
   
   // States for Draggable/Resizable ENV Modal
   const [envModalPos, setEnvModalPos] = useState({ x: 0, y: 0 });
@@ -336,8 +337,10 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
 
   const handleOpenEnv = (containerId) => {
     setEnvLoading(true);
+    setLoadingEnvContainerId(containerId);
     eb.send('docker.container.inspect', { sessionId, userId, containerId }, (err, res) => {
       setEnvLoading(false);
+      setLoadingEnvContainerId(null);
       if (!err && res && res.body && res.body.status === 'ok') {
         const data = res.body.data;
         const env = data.Config ? data.Config.Env : [];
@@ -506,7 +509,12 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
             <h3>Environment Variables: {editingEnv.name}</h3>
             <button className="close-zoom-btn no-drag" onClick={() => setEditingEnv(null)}>×</button>
           </div>
-          <div className="chart-zoom-body">
+          <div className="chart-zoom-body" style={{ position: 'relative' }}>
+            {envLoading && (
+              <div className="modal-loader-overlay">
+                <div className="spinner"></div>
+              </div>
+            )}
             <div className="env-list no-drag">
               {editingEnv.env.map((envStr, index) => {
                 const eqIdx = envStr.indexOf('=');
@@ -547,11 +555,11 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
             </div>
           </div>
           <div className="chart-zoom-footer no-drag">
-            <button className="add-env-btn no-drag" onClick={() => {
+            <button className="add-env-btn no-drag" disabled={envLoading} onClick={() => {
               setEditingEnv({...editingEnv, env: [...editingEnv.env, 'NEW_VAR=']});
             }}>+ Add Variable</button>
             <div style={{ flex: 1 }}></div>
-            <button className="add-env-btn no-drag" onClick={() => setEditingEnv(null)}>Cancel</button>
+            <button className="add-env-btn no-drag" disabled={envLoading} onClick={() => setEditingEnv(null)}>Cancel</button>
             <button onClick={handleSaveEnv} className="download-button no-drag" disabled={envLoading}>
               {envLoading ? 'Updating...' : 'Save & Restart'}
             </button>
@@ -631,7 +639,13 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
                       <button onClick={() => onOpenTerminal(name, c.Id)} title="Terminal">T</button>
                       <button onClick={() => toggleLogs(c.Id)} title="Logs" className={isExpanded ? 'active' : ''}>L</button>
                       <button onClick={() => handleRestart(c.Id)} title="Restart">R</button>
-                      <button onClick={() => handleOpenEnv(c.Id)} title="Environment Variables">ENV</button>
+                      <button 
+                        onClick={() => handleOpenEnv(c.Id)} 
+                        title="Environment Variables"
+                        disabled={envLoading}
+                      >
+                        {loadingEnvContainerId === c.Id ? '...' : 'ENV'}
+                      </button>
                     </td>
                   </tr>
                   {isExpanded && (
