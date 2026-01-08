@@ -6,6 +6,7 @@ import LoginForm from './components/LoginForm';
 import SshTerminal from './components/SshTerminal';
 import DockerView from './components/DockerView';
 import FilesView from './components/FilesView';
+import './components/FilesView.css';
 
 function App() {
   const [user, setUser] = useState(null);
@@ -57,6 +58,63 @@ function App() {
   const [dragOverGroupId, setDragOverGroupId] = useState(null);
   const [draggedTabIndex, setDraggedTabIndex] = useState(null);
   const [dragOverTabIndex, setDragOverTabIndex] = useState(null);
+  const restoringRef = useRef(new Set());
+  const [pinnedFilesTab, setPinnedFilesTab] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ssh_pinned_files_tab');
+      return saved ? JSON.parse(saved) : null;
+    } catch (e) {
+      return null;
+    }
+  });
+
+  const [tasks, setTasks] = useState({});
+  const [showTasks, setShowTasks] = useState(false);
+
+  useEffect(() => {
+    if (!userId) return;
+    const handler = (err, msg) => {
+      if (msg && msg.body) {
+        const { taskId, status, percent, srcPath, error } = msg.body;
+        setTasks(prev => {
+            const currentTask = prev[taskId];
+            const hasHadIssues = currentTask && (currentTask.status === 'fallback' || currentTask.status === 'error' || currentTask.hadError);
+            
+            if (status === 'done' && !hasHadIssues) {
+                const next = { ...prev };
+                delete next[taskId];
+                return next;
+            }
+            return {
+                ...prev,
+                [taskId]: { 
+                    ...currentTask, 
+                    srcPath, 
+                    status, 
+                    percent, 
+                    error: error || (currentTask ? currentTask.error : null),
+                    hadError: hasHadIssues || status === 'error' || status === 'fallback'
+                }
+            };
+        });
+      }
+    };
+    const addr = `ssh.out.${userId}.files.copy.progress`;
+    eb.registerHandler(addr, handler);
+    return () => eb.unregisterHandler(addr, handler);
+  }, [userId]);
+
+  useEffect(() => {
+    if (pinnedFilesTab) {
+      localStorage.setItem('ssh_pinned_files_tab', JSON.stringify(pinnedFilesTab));
+    } else {
+      localStorage.removeItem('ssh_pinned_files_tab');
+    }
+    
+    if (eb.state === EventBus.OPEN && sessionsLoaded) {
+      eb.publish('ssh.session.widget.layout', { pos: widgetPos, size: widgetSize, pinnedFilesTab });
+    }
+  }, [pinnedFilesTab]);
   const searchInputRef = useRef(null);
   const skipUrlSync = useRef(false);
 
@@ -158,6 +216,7 @@ function App() {
   }, [activeTab, tabs]);
 
   const isEmpty = tabs.length === 0;
+  const taskArray = Object.entries(tasks);
 
   useEffect(() => {
     if (isEmpty) {
@@ -274,7 +333,7 @@ function App() {
     const handleMouseUp = () => {
         if (isDragging || resizing) {
           if (eb.state === EventBus.OPEN) {
-            eb.publish('ssh.session.widget.layout', { pos: widgetPos, size: widgetSize });
+            eb.publish('ssh.session.widget.layout', { pos: widgetPos, size: widgetSize, pinnedFilesTab });
           }
         }
         setIsDragging(false);
@@ -542,9 +601,15 @@ function App() {
 
     const widgetLayoutHandler = (err, msg) => {
       if (msg && msg.body && !isDragging && !resizing) {
-        const { pos, size } = msg.body;
+        const { pos, size, pinnedFilesTab: remotePinnedTab } = msg.body;
         if (pos) setWidgetPos(pos);
         if (size) setWidgetSize(size);
+        if (remotePinnedTab !== undefined) {
+          setPinnedFilesTab(current => {
+            if (JSON.stringify(current) === JSON.stringify(remotePinnedTab)) return current;
+            return remotePinnedTab;
+          });
+        }
       }
     };
 
@@ -593,7 +658,11 @@ function App() {
       console.log('Setting up EventBus handlers and syncing sessions for user:', userId);
       setConnected(true);
       eb.send('ssh.session.list', {}, (err, res) => {
-        if (!err && res && res.body) {
+        if (err) {
+            console.error('Failed to list sessions:', err);
+            return;
+        }
+        if (res && res.body) {
           console.log('Received active sessions from backend:', res.body);
           const params = new URLSearchParams(window.location.search);
           const urlTabId = params.get('tab');
@@ -619,10 +688,22 @@ function App() {
           });
           
           setTabs(prev => {
-            const stillConnecting = prev.filter(t => t.status === 'connecting' && !backendSessions.find(b => b.id === t.id));
-            const merged = [...backendSessions, ...stillConnecting];
-            console.log('Syncing tabs. Prev count:', prev.length, 'New count:', merged.length);
-            return merged;
+            const merged = backendSessions.map(b => {
+              const existing = prev.find(p => p.id === b.id);
+              // Если локально мы уже перешли в статус connecting, а бэкенд все еще говорит restorable,
+              // сохраняем наш статус connecting, чтобы избежать "прыжков" и повторных запросов.
+              if (existing && existing.status === 'connecting' && b.status === 'restorable') {
+                return { ...b, status: 'connecting', progressMessage: existing.progressMessage || 'Восстановление...' };
+              }
+              return b;
+            });
+            
+            // Добавляем те, что есть только в prev (например, только что созданные и еще не дошедшие до бэкенда)
+            const onlyInPrev = prev.filter(p => p.status === 'connecting' && !backendSessions.find(b => b.id === p.id));
+            const result = [...merged, ...onlyInPrev];
+            
+            console.log('Syncing tabs. Prev count:', prev.length, 'New count:', result.length);
+            return result;
           });
           setSessionsLoaded(true);
 
@@ -847,15 +928,49 @@ function App() {
   };
 
   const restoreSession = (sessionId) => {
-    if (eb.state !== EventBus.OPEN) return;
+    if (eb.state !== EventBus.OPEN) {
+        console.warn('Cannot restore session: EventBus not open', sessionId);
+        return;
+    }
     
+    // Предотвращаем множественные одновременные запросы на восстановление одного ID
+    if (restoringRef.current.has(sessionId)) {
+        console.log('Restoration already in progress for', sessionId);
+        return;
+    }
+
+    // Проверяем текущий статус таба. Мы используем текущее состояние tabs из замыкания компонента.
+    const currentTab = tabs.find(t => t.id === sessionId);
+    if (!currentTab || currentTab.status !== 'restorable') {
+        return;
+    }
+
+    console.log('Marking session as connecting for restoration:', sessionId);
+    restoringRef.current.add(sessionId);
     setTabs(prev => prev.map(t => 
         t.id === sessionId ? { ...t, status: 'connecting', progressMessage: 'Восстановление сессии...' } : t
     ));
 
+    console.log('Sending ssh.session.restore for', sessionId);
+    
+    // Гарантированная очистка через 15 секунд, если бэкенд молчит
+    const timeout = setTimeout(() => {
+        if (restoringRef.current.has(sessionId)) {
+            console.warn('Restoration timeout reached for', sessionId);
+            restoringRef.current.delete(sessionId);
+            setTabs(prev => prev.map(t => 
+                (t.id === sessionId && t.status === 'connecting') ? { ...t, status: 'error', progressMessage: 'Таймаут восстановления' } : t
+            ));
+        }
+    }, 15000);
+
     eb.send('ssh.session.restore', { sessionId }, (err, res) => {
+        console.log('Received response for ssh.session.restore:', sessionId, { err, res });
+        clearTimeout(timeout);
+        restoringRef.current.delete(sessionId);
+        
         if (err) {
-          handleSessionError(sessionId, err);
+            handleSessionError(sessionId, err);
         }
     });
   };
@@ -892,7 +1007,7 @@ function App() {
 
   useEffect(() => {
     if (connected && detachedSessionId) {
-        eb.send('ssh.session.restore', { sessionId: detachedSessionId });
+        restoreSession(detachedSessionId);
     }
   }, [connected, detachedSessionId]);
 
@@ -1195,7 +1310,7 @@ function App() {
                     userId={userId} 
                     status="connected" 
                     serverName={availableServers.find(s => s.id === detachedServerId)?.name || detachedServerId}
-                    onRestore={() => eb.send('ssh.session.restore', { sessionId: detachedSessionId })}
+                    onRestore={() => restoreSession(detachedSessionId)}
                     onOpenTerminal={(name, containerId) => createSession(detachedServerId, `docker exec -it ${containerId} sh -c "command -v bash >/dev/null && exec bash || exec sh"`, name)}
                 />
             ) : detachedMode === 'files' ? (
@@ -1204,7 +1319,7 @@ function App() {
                     userId={userId} 
                     status="connected" 
                     path={detachedPath}
-                    onRestore={() => eb.send('ssh.session.restore', { sessionId: detachedSessionId })}
+                    onRestore={() => restoreSession(detachedSessionId)}
                     onPathChange={(path) => {
                         const url = new URL(window.location);
                         url.searchParams.set('path', path);
@@ -1216,7 +1331,7 @@ function App() {
                     sessionId={detachedSessionId} 
                     userId={userId} 
                     status="connected" 
-                    onRestore={() => eb.send('ssh.session.restore', { sessionId: detachedSessionId })}
+                    onRestore={() => restoreSession(detachedSessionId)}
                 />
             )}
         </div>
@@ -1224,6 +1339,8 @@ function App() {
   }
 
   const activeTabData = tabs.find(t => t.id === activeTab);
+  const pinnedTabData = pinnedFilesTab ? tabs.find(t => t.id === pinnedFilesTab.sessionId) : null;
+  const pinnedServerName = pinnedTabData ? (availableServers.find(s => s.id === pinnedTabData.serverId)?.name || pinnedTabData.serverId) : '';
 
   return (
     <div className="app-container">
@@ -1258,20 +1375,114 @@ function App() {
             }}
             className="terminal-header"
           >
-            <button 
-                onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-                onAuxClick={(e) => {
-                    if (e.button === 1) {
-                        setIsSidebarCollapsed(false);
-                    }
-                }}
-                className="sidebar-toggle no-drag"
-                title={isSidebarCollapsed ? "Развернуть список" : "Свернуть список"}
-                style={isEmpty ? { visibility: 'hidden' } : {}}
-                disabled={isEmpty}
-            >
-              {isSidebarCollapsed ? '☰' : '◂'}
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} className="no-drag">
+                <button 
+                    onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+                    onAuxClick={(e) => {
+                        if (e.button === 1) {
+                            setIsSidebarCollapsed(false);
+                        }
+                    }}
+                    className="sidebar-toggle no-drag"
+                    title={isSidebarCollapsed ? "Развернуть список" : "Свернуть список"}
+                    style={isEmpty ? { visibility: 'hidden' } : {}}
+                    disabled={isEmpty}
+                >
+                {isSidebarCollapsed ? '☰' : '◂'}
+                </button>
+
+                {taskArray.length > 0 && (
+                    <div className="tasks-widget-container" style={{ position: 'relative' }}>
+                    <button 
+                        className={`tasks-toggle-btn ${showTasks ? 'active' : ''} no-drag`}
+                        onClick={() => setShowTasks(!showTasks)}
+                        title="Задания копирования"
+                        style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: taskArray.some(([_, t]) => t.status === 'error') ? '#e81123' : 
+                                taskArray.some(([_, t]) => t.status === 'copying' || t.status === 'starting') ? '#007acc' : '#888',
+                        cursor: 'pointer',
+                        padding: '4px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        fontSize: '14px'
+                        }}
+                    >
+                        <span>📁</span>
+                        <span style={{ fontSize: '12px', fontWeight: 'bold' }}>{taskArray.length}</span>
+                    </button>
+
+                    {showTasks && (
+                        <div className="tasks-panel-dropdown no-drag" style={{
+                        position: 'absolute',
+                        top: '100%',
+                        left: 0,
+                        width: '300px',
+                        background: '#252526',
+                        border: '1px solid #444',
+                        borderRadius: '6px',
+                        boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
+                        zIndex: 1000,
+                        marginTop: '8px',
+                        textAlign: 'left'
+                        }}>
+                        <div className="tasks-header" style={{
+                            padding: '10px 12px',
+                            background: '#333',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            fontSize: '13px',
+                            fontWeight: 'bold',
+                            borderBottom: '1px solid #444',
+                            borderRadius: '6px 6px 0 0'
+                        }}>
+                            <span>Задания ({taskArray.length})</span>
+                            <button className="no-drag" onClick={() => setShowTasks(false)} style={{ background: 'transparent', border: 'none', color: '#888', cursor: 'pointer', fontSize: '16px' }}>✕</button>
+                        </div>
+                        <div className="tasks-list" style={{ overflowY: 'auto', maxHeight: '400px', padding: '12px' }}>
+                            {taskArray.map(([id, task]) => (
+                            <div key={id} className="task-item" style={{ marginBottom: '15px' }}>
+                                <div className="task-info" style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px', color: '#ccc' }}>
+                                <span className="task-name" title={task.srcPath} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '200px' }}>
+                                    {task.srcPath.split('/').pop()}
+                                </span>
+                                <span className="task-percent" style={{ fontWeight: 'bold', color: '#007acc' }}>{task.percent}%</span>
+                                </div>
+                                <div className="task-progress-bg" style={{ height: '6px', background: '#1e1e1e', borderRadius: '3px', overflow: 'hidden' }}>
+                                <div className="task-progress-fill" style={{ 
+                                    height: '100%',
+                                    width: `${task.percent}%`,
+                                    transition: 'width 0.3s ease',
+                                    backgroundColor: task.status === 'error' ? '#e81123' : (task.status === 'fallback' ? '#ff9800' : (task.status === 'done' ? '#4caf50' : '#007acc'))
+                                }} />
+                                </div>
+                                {task.status === 'done' && <div className="task-status-text" style={{ fontSize: '11px', color: '#4caf50', marginTop: '5px' }}>Успешно завершено</div>}
+                                {task.status === 'error' && <div className="task-error-text" style={{ fontSize: '11px', color: '#e81123', marginTop: '5px', wordBreak: 'break-all' }}>{task.error}</div>}
+                                {task.status === 'fallback' && (
+                                <div className="task-status-text" style={{ fontSize: '11px', color: '#ff9800', marginTop: '5px' }}>
+                                    Переключение на поток...
+                                    {task.error && <div className="task-error-text" style={{ marginTop: 2 }}>{task.error}</div>}
+                                </div>
+                                )}
+                                {task.hadError && task.status === 'done' && task.error && (
+                                <div className="task-error-text" style={{ marginTop: 2, color: '#aaa', fontSize: '11px' }}>
+                                    Была ошибка: {task.error}
+                                </div>
+                                )}
+                            </div>
+                            ))}
+                        </div>
+                        <div className="tasks-footer" style={{ padding: '8px 12px', borderTop: '1px solid #444', textAlign: 'right' }}>
+                            <button className="no-drag" onClick={() => setTasks({})} style={{ fontSize: '11px', background: 'transparent', border: 'none', color: '#007acc', cursor: 'pointer' }}>Очистить всё</button>
+                        </div>
+                        </div>
+                    )}
+                    </div>
+                )}
+            </div>
             <div className="terminal-header-center">
               <span 
                 className="terminal-header-title"
@@ -1308,8 +1519,27 @@ function App() {
                   <button 
                     className={`header-tab ${activeTabData?.viewMode === 'files' ? 'active' : ''}`}
                     onClick={() => setViewMode(activeTab, 'files')}
-                    onAuxClick={(e) => handleModeAuxClick(e, 'files')}
+                    onAuxClick={(e) => {
+                        if (e.button === 1) {
+                            setPinnedFilesTab({ 
+                                sessionId: activeTab, 
+                                serverId: activeTabData.serverId,
+                                path: activeTabData.currentPath || '.' 
+                            });
+                        }
+                    }}
                   >FILES</button>
+                  {activeTabData?.viewMode === 'files' && (
+                    <button 
+                      className="header-tab pin-btn"
+                      title="Pin current files view"
+                      onClick={() => setPinnedFilesTab({ 
+                          sessionId: activeTab, 
+                          serverId: activeTabData.serverId,
+                          path: activeTabData.currentPath || '.' 
+                      })}
+                    >📌</button>
+                  )}
                 </div>
               )}
             </div>
@@ -1460,6 +1690,8 @@ function App() {
                                 userId={userId}
                                 status={tab.status}
                                 path={tab.currentPath}
+                                serverId={tab.serverId}
+                                serverName={availableServers.find(s => s.id === tab.serverId)?.name || tab.serverId}
                                 onRestore={() => restoreSession(tab.id)}
                                 onPathChange={(path) => {
                                   if (tab.currentPath !== path) {
@@ -1467,6 +1699,17 @@ function App() {
                                   }
                                   updateUrl(tab.id, 'files', path, tab.serverId);
                                 }}
+                                pinnedTab={pinnedFilesTab}
+                                pinnedStatus={pinnedTabData?.status}
+                                pinnedServerId={pinnedFilesTab?.serverId}
+                                pinnedServerName={pinnedServerName}
+                                onPinPathChange={(path) => setPinnedFilesTab(prev => prev ? { ...prev, path } : null)}
+                                onPinRestore={() => pinnedTabData && restoreSession(pinnedTabData.id)}
+                                onPinClose={() => setPinnedFilesTab(null)}
+                                tasks={tasks}
+                                setTasks={setTasks}
+                                showTasks={showTasks}
+                                setShowTasks={setShowTasks}
                             />
                           ) : (
                             <SshTerminal sessionId={tab.id} userId={userId} status={tab.status} onRestore={() => restoreSession(tab.id)} />

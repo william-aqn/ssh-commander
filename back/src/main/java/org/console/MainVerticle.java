@@ -211,48 +211,67 @@ public class MainVerticle extends AbstractVerticle {
     }
 
     private void handleBridgeEvent(io.vertx.ext.web.handler.sockjs.BridgeEvent event) {
-        if (event.type() == BridgeEventType.SOCKET_CREATED) {
-            if (event.socket().webSession() == null || event.socket().webSession().get(SESSION_USER_ID) == null) {
-                event.complete(false);
+        try {
+            if (event.type() == BridgeEventType.SOCKET_CREATED) {
+                logger.debug("Socket created: {}", (event.socket() != null ? event.socket().remoteAddress() : "unknown"));
+                event.tryComplete(true);
                 return;
             }
-        }
 
-        if (event.type() == BridgeEventType.REGISTER) {
-            String userId = event.socket().webSession().get(SESSION_USER_ID);
-            String address = event.getRawMessage().getString("address");
-            if (address != null && address.startsWith(SSH_COMMAND_OUT_PREFIX) && !address.startsWith(SSH_COMMAND_OUT_PREFIX + userId + ".")) {
-                logger.warn("User {} tried to subscribe to unauthorized address: {}", userId, address);
-                event.complete(false);
-                return;
+            if (event.type() == BridgeEventType.REGISTER) {
+                String userId = (event.socket() != null && event.socket().webSession() != null) ? event.socket().webSession().get(SESSION_USER_ID) : null;
+                if (userId != null) {
+                    String address = event.getRawMessage().getString("address");
+                    if (address != null && address.startsWith(SSH_COMMAND_OUT_PREFIX) && !address.startsWith(SSH_COMMAND_OUT_PREFIX + userId + ".")) {
+                        logger.warn("User {} tried to subscribe to unauthorized address: {}", userId, address);
+                        event.tryComplete(false);
+                        return;
+                    }
+                }
             }
-        }
 
-        if (event.type() == BridgeEventType.SEND || event.type() == BridgeEventType.PUBLISH) {
-            String userId = event.socket().webSession().get(SESSION_USER_ID);
-            if (userId != null) {
+            if (event.type() == BridgeEventType.SEND || event.type() == BridgeEventType.PUBLISH) {
+                io.vertx.ext.web.Session session = (event.socket() != null) ? event.socket().webSession() : null;
+                String userId = (session != null) ? session.get(SESSION_USER_ID) : null;
+                
                 JsonObject rawMessage = event.getRawMessage();
-                String address = rawMessage.getString("address");
-
-                // Синхронизация виджета между вкладками пользователя
-                if (event.type() == BridgeEventType.PUBLISH && SSH_SESSION_WIDGET_LAYOUT.equals(address)) {
-                    vertx.eventBus().publish(SSH_COMMAND_OUT_PREFIX + userId + ".ssh.widget.layout", rawMessage.getJsonObject("body"));
+                String address = rawMessage != null ? rawMessage.getString("address") : null;
+                
+                if (SSH_SESSION_RESTORE.equals(address)) {
+                    logger.info("Bridge event: type={}, address={}, userId={}", event.type(), address, userId);
+                } else if (logger.isDebugEnabled()) {
+                    logger.debug("Bridge event: type={}, address={}, userId={}", event.type(), address, userId);
                 }
 
-                // Синхронизация режима отображения (terminal/docker) между вкладками пользователя
-                if (event.type() == BridgeEventType.PUBLISH && SSH_SESSION_VIEWMODE_SYNC.equals(address)) {
-                    vertx.eventBus().publish(SSH_COMMAND_OUT_PREFIX + userId + ".ssh.viewmode.sync", rawMessage.getJsonObject("body"));
-                }
+                if (userId != null) {
+                    if (rawMessage != null) {
+                        JsonObject modifiableMessage = rawMessage.copy();
 
-                JsonObject body = rawMessage.getJsonObject("body");
-                if (body != null) {
-                    body.put(SESSION_USER_ID, userId);
-                } else {
-                    rawMessage.put("body", new JsonObject().put(SESSION_USER_ID, userId));
+                        // Синхронизация виджета между вкладками пользователя
+                        if (event.type() == BridgeEventType.PUBLISH && SSH_SESSION_WIDGET_LAYOUT.equals(address)) {
+                            vertx.eventBus().publish(SSH_COMMAND_OUT_PREFIX + userId + ".ssh.widget.layout", modifiableMessage.getJsonObject("body"));
+                        }
+
+                        // Синхронизация режима отображения (terminal/docker) между вкладками пользователя
+                        if (event.type() == BridgeEventType.PUBLISH && SSH_SESSION_VIEWMODE_SYNC.equals(address)) {
+                            vertx.eventBus().publish(SSH_COMMAND_OUT_PREFIX + userId + ".ssh.viewmode.sync", modifiableMessage.getJsonObject("body"));
+                        }
+
+                        JsonObject body = modifiableMessage.getJsonObject("body");
+                        if (body == null) {
+                            body = new JsonObject();
+                            modifiableMessage.put("body", body);
+                        }
+                        body.put(SESSION_USER_ID, userId);
+                        event.setRawMessage(modifiableMessage);
+                    }
                 }
             }
+        } catch (Exception e) {
+            logger.error("Error in bridge event handler", e);
+        } finally {
+            event.tryComplete(true);
         }
-        event.complete(true);
     }
 
     private void handleUpload(RoutingContext ctx) {
@@ -314,6 +333,13 @@ public class MainVerticle extends AbstractVerticle {
                 }
 
                 ctx.response().setStatusCode(200).end(new JsonObject().put("status", "ok").encode());
+                
+                // Оповещаем об изменении файлов в директории
+                String userId = config.getString(SESSION_USER_ID);
+                String serverId = config.getString("serverId");
+                vertx.eventBus().publish(SSH_COMMAND_OUT_PREFIX + userId + FILES_CHANGED, new JsonObject()
+                    .put("serverId", serverId)
+                    .put("path", remotePath));
                 return null;
             } catch (Exception e) {
                 logger.error("Upload failed", e);

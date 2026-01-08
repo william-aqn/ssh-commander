@@ -10,6 +10,12 @@ const SshTerminal = ({ sessionId, userId, status, onRestore }) => {
   const fitAddonRef = useRef(null);
 
   useEffect(() => {
+    if (status === 'restorable' && onRestore) {
+      onRestore();
+    }
+  }, [status, onRestore]);
+
+  useEffect(() => {
     if (!userId || status !== 'connected') return;
 
     const term = new Terminal({

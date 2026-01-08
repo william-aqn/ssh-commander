@@ -36,6 +36,11 @@ public class Constants {
     public static final String FILES_MKDIR = "files.mkdir";
     public static final String FILES_DELETE = "files.delete";
     public static final String FILES_CHMOD = "files.chmod";
+    public static final String FILES_COPY = "files.copy";
+    public static final String FILES_COPY_PROGRESS = ".files.copy.progress";
+    public static final String FILES_CHANGED = ".files.changed";
+    public static final String FILES_CHECK_TOOLS = "files.check.tools";
+    public static final String FILES_INSTALL_TOOLS = "files.install.tools";
 
     // Session attributes
     public static final String SESSION_USER_ID = "userId";

@@ -5,6 +5,7 @@ import com.jcraft.jsch.ChannelExec;
 import com.jcraft.jsch.ChannelShell;
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.Session;
+import com.jcraft.jsch.SftpProgressMonitor;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -43,6 +44,7 @@ public class SshVerticle extends AbstractVerticle {
     private final Map<String, JsonObject> restorableSessions = new ConcurrentHashMap<>();
     private final Map<String, JsonObject> dockerCache = new ConcurrentHashMap<>();
     private final Map<String, Future<String>> pendingDockerRequests = new ConcurrentHashMap<>();
+    private final java.util.Set<String> connectingSessions = java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Semaphore dockerApiSemaphore = new Semaphore(15);
 
     public SshVerticle(Redis redis, Map<String, JsonObject> serverConfigs, Map<String, JsonObject> userConfigs) {
@@ -168,16 +170,19 @@ public class SshVerticle extends AbstractVerticle {
                 return;
             }
             
-            if (sessions.containsKey(sessionId)) {
+            if (sessions.containsKey(sessionId) || connectingSessions.contains(sessionId)) {
                 message.reply(new JsonObject().put("status", "already_connected"));
                 return;
             }
+
+            connectingSessions.add(sessionId);
 
             // Проверка лимита сессий для пользователя на данном сервере
             String command = body.getString("command");
             boolean isDocker = isDockerCommand(command);
             
             if (!checkSessionLimit(userId, serverId, isDocker, message)) {
+                connectingSessions.remove(sessionId);
                 return;
             }
 
@@ -192,6 +197,7 @@ public class SshVerticle extends AbstractVerticle {
                 .put("name", body.getString("name", serverConfig.getString("name")));
 
             connectSsh(fullConfig, sessionId, serverId, userId)
+                .onComplete(ar -> connectingSessions.remove(sessionId))
                 .onSuccess(v -> {
                     if (isDocker && !hasDockerView(userId, serverId)) {
                         logger.warn("Discarding docker terminal {} because parent Docker View for server {} was closed", sessionId, serverId);
@@ -215,12 +221,18 @@ public class SshVerticle extends AbstractVerticle {
         // Восстановление сессии по запросу
         vertx.eventBus().<JsonObject>consumer(SSH_SESSION_RESTORE, message -> {
             Object bodyObj = message.body();
-            if (!(bodyObj instanceof JsonObject)) return;
+            if (!(bodyObj instanceof JsonObject)) {
+                logger.warn("Invalid body for restore session: {}", bodyObj);
+                return;
+            }
             JsonObject body = (JsonObject) bodyObj;
             String sessionId = body.getString("sessionId");
             String userId = body.getString(SESSION_USER_ID);
 
-            if (sessions.containsKey(sessionId)) {
+            logger.info("Restore session request received: sessionId={}, userId={}", sessionId, userId);
+
+            if (sessions.containsKey(sessionId) || connectingSessions.contains(sessionId)) {
+                logger.info("Session {} already connecting or active", sessionId);
                 message.reply(new JsonObject().put("status", "already_connected"));
                 return;
             }
@@ -228,11 +240,16 @@ public class SshVerticle extends AbstractVerticle {
             JsonObject config = restorableSessions.get(sessionId);
             if (config != null) {
                 if (userId != null && userId.equals(config.getString(SESSION_USER_ID))) {
+                    connectingSessions.add(sessionId);
                     String serverId = config.getString("serverId");
                     String cmd = config.getString("command", "");
                     boolean isDocker = config.getBoolean("isDocker", isDockerCommand(cmd));
                     logger.info("Restoring session on demand: {} for user id {}", sessionId, userId);
                     connectSsh(config, sessionId, serverId, userId)
+                        .onComplete(ar -> {
+                            connectingSessions.remove(sessionId);
+                            logger.info("Restore session complete: sessionId={}, success={}", sessionId, ar.succeeded());
+                        })
                         .onSuccess(v -> {
                             if (isDocker && !hasDockerView(userId, serverId)) {
                                 logger.warn("Discarding restored docker terminal {} because parent Docker View for server {} was closed", sessionId, serverId);
@@ -251,9 +268,11 @@ public class SshVerticle extends AbstractVerticle {
                             message.fail(500, err.getMessage());
                         });
                 } else {
+                    logger.warn("Restore unauthorized: sessionId={}, userId={}", sessionId, userId);
                     message.fail(403, "Not authorized");
                 }
             } else {
+                logger.warn("Restore failed: metadata not found for sessionId={}", sessionId);
                 message.fail(404, "Session metadata not found");
             }
         });
@@ -503,17 +522,21 @@ public class SshVerticle extends AbstractVerticle {
             }
 
             String sanitizedPath = ShellUtils.sanitize(path);
-            String command = String.format("ls -la --time-style=long-iso %s; echo '---DF---'; df -h %s | tail -n 1", sanitizedPath, sanitizedPath);
+            String command = String.format("readlink -f %1$s; echo '---LS---'; ls -la --time-style=long-iso %1$s; echo '---DF---'; df -h %1$s | tail -n 1", sanitizedPath);
             executeCommand(jschSession, command)
                 .onSuccess(output -> {
-                    String[] parts = output.split("---DF---");
+                    String[] lsParts = output.split("---LS---");
+                    String absolutePath = lsParts[0].trim();
+                    String remaining = lsParts.length > 1 ? lsParts[1] : "";
+
+                    String[] parts = remaining.split("---DF---");
                     JsonArray files = parseLsOutput(parts[0]);
                     JsonObject diskInfo = parts.length > 1 ? parseDfOutput(parts[1]) : null;
 
                     JsonObject reply = new JsonObject()
                         .put("status", "ok")
                         .put("files", files)
-                        .put("path", path);
+                        .put("path", absolutePath.isEmpty() ? path : absolutePath);
                     if (diskInfo != null) {
                         reply.put("diskInfo", diskInfo);
                     }
@@ -616,7 +639,10 @@ public class SshVerticle extends AbstractVerticle {
 
             String command = String.format("mkdir -p %s", ShellUtils.sanitize(path));
             executeCommand(jschSession, command)
-                .onSuccess(v -> message.reply(new JsonObject().put("status", "ok")))
+                .onSuccess(v -> {
+                    message.reply(new JsonObject().put("status", "ok"));
+                    notifyFilesChanged(userId, serverId, path);
+                })
                 .onFailure(err -> message.fail(500, err.getMessage()));
         });
 
@@ -644,7 +670,12 @@ public class SshVerticle extends AbstractVerticle {
             }
 
             executeCommand(jschSession, sb.toString())
-                .onSuccess(v -> message.reply(new JsonObject().put("status", "ok")))
+                .onSuccess(v -> {
+                    message.reply(new JsonObject().put("status", "ok"));
+                    for (int i = 0; i < paths.size(); i++) {
+                        notifyFilesChanged(userId, serverId, paths.getString(i));
+                    }
+                })
                 .onFailure(err -> message.fail(500, err.getMessage()));
         });
 
@@ -672,6 +703,233 @@ public class SshVerticle extends AbstractVerticle {
                 .onSuccess(v -> message.reply(new JsonObject().put("status", "ok")))
                 .onFailure(err -> message.fail(500, err.getMessage()));
         });
+
+        vertx.eventBus().<JsonObject>consumer(FILES_COPY, message -> {
+            JsonObject body = message.body();
+            String srcPath = body.getString("srcPath");
+            String destPath = body.getString("destPath");
+            String srcSessionId = body.getString("srcSessionId");
+            String destSessionId = body.getString("destSessionId");
+            String userId = body.getString(SESSION_USER_ID);
+            String taskId = body.getString("taskId");
+
+            String srcServerId = getServerId(srcSessionId, userId);
+            String destServerId = getServerId(destSessionId, userId);
+
+            if (srcServerId == null || destServerId == null) {
+                message.fail(403, "Access denied");
+                return;
+            }
+
+            if (srcServerId.equals(destServerId)) {
+                // Локальное копирование на одном сервере
+                Session jschSession = getAnyActiveJschSession(srcServerId);
+                if (jschSession == null) {
+                    message.fail(503, "SSH session not active");
+                    return;
+                }
+                String command = String.format("cp -r %s %s", ShellUtils.sanitize(srcPath), ShellUtils.sanitize(destPath));
+                executeCommand(jschSession, command)
+                    .onSuccess(v -> {
+                        sendCopyProgress(userId, taskId, srcPath, "done", 100);
+                        message.reply(new JsonObject().put("status", "ok"));
+                        notifyFilesChanged(userId, destServerId, destPath);
+                    })
+                    .onFailure(err -> message.fail(500, err.getMessage()));
+            } else {
+                String method = body.getString("method", "stream");
+                if ("direct".equals(method)) {
+                    tryDirectCopy(srcServerId, destServerId, srcPath, destPath)
+                        .onSuccess(v -> {
+                            sendCopyProgress(userId, taskId, srcPath, "done", 100);
+                            message.reply(new JsonObject().put("status", "ok"));
+                            notifyFilesChanged(userId, destServerId, destPath);
+                        })
+                        .onFailure(err -> {
+                            logger.info("Direct copy failed, falling back to streaming: {}", err.getMessage());
+                            sendCopyProgress(userId, taskId, srcPath, "fallback", 0, err.getMessage());
+                            performStreamingCopy(srcServerId, destServerId, srcPath, destPath, userId, taskId, message);
+                        });
+                } else {
+                    performStreamingCopy(srcServerId, destServerId, srcPath, destPath, userId, taskId, message);
+                }
+            }
+        });
+
+        vertx.eventBus().<JsonObject>consumer(FILES_CHECK_TOOLS, message -> {
+            JsonObject body = message.body();
+            String sessionId = body.getString("sessionId");
+            String userId = body.getString(SESSION_USER_ID);
+
+            String serverId = getServerId(sessionId, userId);
+            if (serverId == null) {
+                message.fail(403, "Access denied");
+                return;
+            }
+
+            Session jschSession = getAnyActiveJschSession(serverId);
+            if (jschSession == null) {
+                message.fail(503, "SSH session not active");
+                return;
+            }
+
+            // Проверяем scp и sshpass
+            executeCommand(jschSession, "which scp && which sshpass")
+                .onSuccess(v -> message.reply(new JsonObject().put("status", "ok").put("available", true)))
+                .onFailure(err -> message.reply(new JsonObject().put("status", "ok").put("available", false).put("error", err.getMessage())));
+        });
+
+        vertx.eventBus().<JsonObject>consumer(FILES_INSTALL_TOOLS, message -> {
+            JsonObject body = message.body();
+            String sessionId = body.getString("sessionId");
+            String userId = body.getString(SESSION_USER_ID);
+            String taskId = body.getString("taskId");
+
+            String serverId = getServerId(sessionId, userId);
+            if (serverId == null) {
+                message.fail(403, "Access denied");
+                return;
+            }
+
+            Session jschSession = getAnyActiveJschSession(serverId);
+            if (jschSession == null) {
+                message.fail(503, "SSH session not active");
+                return;
+            }
+
+            message.reply(new JsonObject().put("status", "ok"));
+            
+            sendCopyProgress(userId, taskId, "Установка инструментов (scp, sshpass)", "copying", 10);
+            
+            // Пытаемся определить менеджер пакетов и установить
+            String installCmd = "(command -v apt-get >/dev/null && apt-get update && apt-get install -y openssh-client sshpass) || " +
+                               "(command -v yum >/dev/null && yum install -y openssh-clients sshpass) || " +
+                               "(command -v apk >/dev/null && apk add openssh-client sshpass) || " +
+                               "echo 'Не удалось определить менеджер пакетов'";
+            
+            executeCommand(jschSession, installCmd)
+                .onSuccess(output -> {
+                    if (output.contains("Не удалось определить менеджер пакетов")) {
+                        sendCopyProgress(userId, taskId, "Установка инструментов", "error", 0);
+                        logger.error("Failed to install tools: Package manager not found");
+                    } else {
+                        sendCopyProgress(userId, taskId, "Установка инструментов", "done", 100);
+                    }
+                })
+                .onFailure(err -> {
+                    sendCopyProgress(userId, taskId, "Установка инструментов", "error", 0);
+                    logger.error("Failed to install tools: " + err.getMessage());
+                });
+        });
+    }
+
+    private Future<String> tryDirectCopy(String srcServerId, String destServerId, String srcPath, String destPath) {
+        Session srcJsch = getAnyActiveJschSession(srcServerId);
+        if (srcJsch == null) return Future.failedFuture("Source SSH session not active");
+
+        JsonObject destServerConfig = serverConfigs.get(destServerId);
+        if (destServerConfig == null) return Future.failedFuture("Destination server config not found");
+
+        String destHost = destServerConfig.getString("host");
+        String destUser = destServerConfig.getString("username");
+        String destPass = destServerConfig.getString("password");
+        int destPort = destServerConfig.getInteger("port", 22);
+
+        // Используем sshpass для передачи пароля и scp для копирования
+        // StrictHostKeyChecking=no и UserKnownHostsFile=/dev/null чтобы полностью игнорировать проверку ключей
+        String scpCmd = String.format("sshpass -p %s scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P %d -r %s %s@%s:%s",
+                ShellUtils.sanitize(destPass),
+                destPort,
+                ShellUtils.sanitize(srcPath),
+                destUser,
+                destHost,
+                ShellUtils.sanitize(destPath));
+
+        return executeCommand(srcJsch, scpCmd);
+    }
+
+    private void performStreamingCopy(String srcServerId, String destServerId, String srcPath, String destPath, String userId, String taskId, Message<JsonObject> message) {
+        vertx.executeBlocking(() -> {
+            Session srcJsch = getAnyActiveJschSession(srcServerId);
+            Session destJsch = getAnyActiveJschSession(destServerId);
+
+            if (srcJsch == null || destJsch == null) {
+                throw new RuntimeException("One of SSH sessions is not active");
+            }
+
+            com.jcraft.jsch.ChannelSftp sftpSrc = null;
+            com.jcraft.jsch.ChannelSftp sftpDest = null;
+            try {
+                sftpSrc = (com.jcraft.jsch.ChannelSftp) srcJsch.openChannel("sftp");
+                sftpSrc.connect();
+                sftpDest = (com.jcraft.jsch.ChannelSftp) destJsch.openChannel("sftp");
+                sftpDest.connect();
+
+                long fileSize = 0;
+                try {
+                    fileSize = sftpSrc.stat(srcPath).getSize();
+                } catch (Exception e) {
+                    logger.warn("Could not get file size for progress: {}", e.getMessage());
+                }
+
+                final long finalSize = fileSize;
+                SftpProgressMonitor monitor = new SftpProgressMonitor() {
+                    private long transferred = 0;
+                    private long lastUpdate = 0;
+
+                    @Override
+                    public void init(int op, String src, String dest, long max) {}
+
+                    @Override
+                    public boolean count(long count) {
+                        transferred += count;
+                        long now = System.currentTimeMillis();
+                        if (now - lastUpdate > 500) { // Update every 500ms
+                            int percent = finalSize > 0 ? (int) (transferred * 100 / finalSize) : 0;
+                            sendCopyProgress(userId, taskId, srcPath, "copying", percent);
+                            lastUpdate = now;
+                        }
+                        return true;
+                    }
+
+                    @Override
+                    public void end() {
+                        sendCopyProgress(userId, taskId, srcPath, "done", 100);
+                    }
+                };
+
+                java.io.InputStream is = sftpSrc.get(srcPath);
+                sftpDest.put(is, destPath, monitor);
+                return null;
+            } catch (Exception e) {
+                sendCopyProgress(userId, taskId, srcPath, "error", 0);
+                throw new RuntimeException("Remote copy failed: " + e.getMessage(), e);
+            } finally {
+                if (sftpSrc != null) sftpSrc.disconnect();
+                if (sftpDest != null) sftpDest.disconnect();
+            }
+        }).onSuccess(v -> {
+            message.reply(new JsonObject().put("status", "ok"));
+            notifyFilesChanged(userId, destServerId, destPath);
+        })
+          .onFailure(err -> message.fail(500, err.getMessage()));
+    }
+
+    private void sendCopyProgress(String userId, String taskId, String srcPath, String status, int percent) {
+        sendCopyProgress(userId, taskId, srcPath, status, percent, null);
+    }
+
+    private void sendCopyProgress(String userId, String taskId, String srcPath, String status, int percent, String error) {
+        if (taskId == null) return;
+        JsonObject progress = new JsonObject()
+            .put("taskId", taskId)
+            .put("srcPath", srcPath)
+            .put("status", status)
+            .put("percent", percent);
+        if (error != null) {
+            progress.put("error", error);
+        }
+        vertx.eventBus().publish(SSH_COMMAND_OUT_PREFIX + userId + FILES_COPY_PROGRESS, progress);
     }
 
     private Future<String> executeCommand(Session jschSession, String command) {
@@ -1130,11 +1388,13 @@ public class SshVerticle extends AbstractVerticle {
         String viewMode = config.getString("viewMode", "terminal");
         String command = config.getString("command");
         boolean isDocker = command != null && command.startsWith("docker exec");
+        logger.info("connectSsh started: sessionId={}, serverId={}, userId={}, viewMode={}", sessionId, serverId, userId, viewMode);
         return vertx.executeBlocking(() -> {
             try {
                 Session jschSession = null;
                 String jschSessionKey = null;
                 synchronized (jschSessions) {
+                    logger.debug("Finding/creating jschSession for server: {}", serverId);
                     // Ищем существующую сессию с доступными слотами для каналов (обычно лимит 10)
                     for (int i = 0; i < 100; i++) {
                         String candidateKey = serverId + ":" + i;
@@ -1155,6 +1415,7 @@ public class SshVerticle extends AbstractVerticle {
                     }
 
                     if (jschSession == null) {
+                        logger.info("Establishing new SSH connection for server {} (key: {})", serverId, jschSessionKey);
                         sendProgress(userId, sessionId, "Инициализация нового подключения...");
                         JSch jsch = new JSch();
                         String host = config.getString("host");
@@ -1171,6 +1432,7 @@ public class SshVerticle extends AbstractVerticle {
                         jschSession.setConfig(prop);
 
                         sendProgress(userId, sessionId, "Подключение к серверу...");
+                        logger.info("Connecting to {}:{}...", host, port);
                         jschSession.connect(30000);
 
                         jschSessions.put(jschSessionKey, jschSession);
@@ -1179,6 +1441,7 @@ public class SshVerticle extends AbstractVerticle {
                     }
                 }
 
+                logger.debug("Opening SSH channel: sessionId={}", sessionId);
                 sendProgress(userId, sessionId, "Открытие канала...");
                 Channel channel;
                 if (command != null && !command.isEmpty()) {
@@ -1217,6 +1480,7 @@ public class SshVerticle extends AbstractVerticle {
 
                     @Override
                     public void close() {
+                        logger.info("SSH channel closed: sessionId={}", sessionId);
                         if (sessions.remove(sessionId) != null) {
                             closeSshSession(sshSession);
                             // Не удаляем из Redis, чтобы сессия была восстанавливаемой
@@ -1229,10 +1493,13 @@ public class SshVerticle extends AbstractVerticle {
                 channel.setExtOutputStream(sshOut);
 
                 try {
+                    logger.info("Connecting SSH channel: sessionId={}", sessionId);
                     channel.connect(30000);
                     sessions.put(sessionId, sshSession);
                     sendProgress(userId, sessionId, "Готово");
+                    logger.info("SSH session ready: sessionId={}", sessionId);
                 } catch (Exception e) {
+                    logger.error("Failed to connect SSH channel: sessionId={}", sessionId, e);
                     sessions.remove(sessionId);
                     closeSshSession(sshSession);
                     throw e;
@@ -1240,6 +1507,7 @@ public class SshVerticle extends AbstractVerticle {
 
                 return null;
             } catch (Exception e) {
+                logger.error("connectSsh failed: sessionId={}", sessionId, e);
                 throw new RuntimeException(e);
             }
         });
@@ -1290,6 +1558,24 @@ public class SshVerticle extends AbstractVerticle {
 
     private boolean isDockerCommand(String command) {
         return command != null && command.startsWith("docker exec");
+    }
+
+    private void notifyFilesChanged(String userId, String serverId, String path) {
+        if (path == null || userId == null || serverId == null) return;
+        String parentPath = getParentPath(path);
+        vertx.eventBus().publish(SSH_COMMAND_OUT_PREFIX + userId + FILES_CHANGED, new JsonObject()
+            .put("serverId", serverId)
+            .put("path", parentPath));
+    }
+
+    private String getParentPath(String path) {
+        if (path == null || path.equals("/") || path.equals(".")) return path;
+        String p = path;
+        if (p.endsWith("/")) p = p.substring(0, p.length() - 1);
+        int lastSlash = p.lastIndexOf('/');
+        if (lastSlash == -1) return ".";
+        if (lastSlash == 0) return "/";
+        return p.substring(0, lastSlash);
     }
 
     private static class SshSession {

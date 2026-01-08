@@ -25,6 +25,12 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
   const [zoomedContainerId, setZoomedContainerId] = useState(null);
   const chartRef = useRef(null);
 
+  useEffect(() => {
+    if (status === 'restorable' && onRestore) {
+      onRestore();
+    }
+  }, [status, onRestore]);
+
   const fetchContainers = useCallback(() => {
     if (status !== 'connected') return;
     setLoading(true);
