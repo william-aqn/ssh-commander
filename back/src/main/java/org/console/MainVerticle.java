@@ -173,7 +173,7 @@ public class MainVerticle extends AbstractVerticle {
                 jschSession = jsch.getSession(config.getString("user"), config.getString("host"), config.getInteger("port", 22));
                 jschSession.setPassword(config.getString("password"));
                 Properties prop = new Properties();
-                prop.put("StrictHostKeyChecking", "yes");
+                prop.put("StrictHostKeyChecking", "no");
                 jschSession.setConfig(prop);
                 jschSession.connect(15000);
 
@@ -315,7 +315,7 @@ public class MainVerticle extends AbstractVerticle {
                 jschSession = jsch.getSession(config.getString("user"), config.getString("host"), config.getInteger("port", 22));
                 jschSession.setPassword(config.getString("password"));
                 Properties prop = new Properties();
-                prop.put("StrictHostKeyChecking", "yes");
+                prop.put("StrictHostKeyChecking", "no");
                 jschSession.setConfig(prop);
                 jschSession.connect(15000);
 

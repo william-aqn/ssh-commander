@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { eb, subscribeEb, EventBus } from './services/eventBus';
+import { eb, subscribeEb, EventBus, registerHandler } from './services/eventBus';
 import MatrixBackground from './components/MatrixBackground';
 import RetryTimer from './components/RetryTimer';
 import LoginForm from './components/LoginForm';
 import SshTerminal from './components/SshTerminal';
 import DockerView from './components/DockerView';
 import FilesView from './components/FilesView';
+import TasksWidget from './components/TasksWidget';
 import './components/FilesView.css';
 
 function App() {
@@ -100,8 +101,7 @@ function App() {
       }
     };
     const addr = `ssh.out.${userId}.files.copy.progress`;
-    eb.registerHandler(addr, handler);
-    return () => eb.unregisterHandler(addr, handler);
+    return registerHandler(addr, handler);
   }, [userId]);
 
   useEffect(() => {
@@ -112,7 +112,12 @@ function App() {
     }
     
     if (eb.state === EventBus.OPEN && sessionsLoaded) {
-      eb.publish('ssh.session.widget.layout', { pos: widgetPos, size: widgetSize, pinnedFilesTab });
+      const currentStr = JSON.stringify(pinnedFilesTab);
+      // Отправляем на бэкенд только если изменение произошло локально
+      if (window._lastRemotePinnedTab !== currentStr) {
+        // console.log('[DEBUG_LOG] Publishing layout to EB (local change)', currentStr);
+        eb.publish('ssh.session.widget.layout', { pos: widgetPos, size: widgetSize, pinnedFilesTab });
+      }
     }
   }, [pinnedFilesTab]);
   const searchInputRef = useRef(null);
@@ -216,7 +221,6 @@ function App() {
   }, [activeTab, tabs]);
 
   const isEmpty = tabs.length === 0;
-  const taskArray = Object.entries(tasks);
 
   useEffect(() => {
     if (isEmpty) {
@@ -601,15 +605,20 @@ function App() {
 
     const widgetLayoutHandler = (err, msg) => {
       if (msg && msg.body && !isDragging && !resizing) {
-        const { pos, size, pinnedFilesTab: remotePinnedTab } = msg.body;
-        if (pos) setWidgetPos(pos);
-        if (size) setWidgetSize(size);
-        if (remotePinnedTab !== undefined) {
-          setPinnedFilesTab(current => {
-            if (JSON.stringify(current) === JSON.stringify(remotePinnedTab)) return current;
-            return remotePinnedTab;
-          });
-        }
+    const { pos, size, pinnedFilesTab: remotePinnedTab } = msg.body;
+    // console.log('[DEBUG_LOG] Received layout from remote:', { pos, size, remotePinnedTab });
+    if (pos) setWidgetPos(pos);
+    if (size) setWidgetSize(size);
+    if (remotePinnedTab !== undefined) {
+      const remoteStr = JSON.stringify(remotePinnedTab);
+      const currentStr = JSON.stringify(pinnedFilesTab);
+      
+      if (currentStr !== remoteStr) {
+        // console.log('[DEBUG_LOG] Updating pinnedFilesTab from remote');
+        window._lastRemotePinnedTab = remoteStr;
+        setPinnedFilesTab(remotePinnedTab);
+      }
+    }
       }
     };
 
@@ -757,13 +766,16 @@ function App() {
         }
       });
 
-      eb.registerHandler(`ssh.out.${userId}.ssh.session.progress`, progressHandler);
-      eb.registerHandler(`ssh.out.${userId}.ssh.session.created`, sessionCreatedHandler);
-      eb.registerHandler(`ssh.out.${userId}.ssh.session.terminated`, sessionTerminatedHandler);
-      eb.registerHandler(`ssh.out.${userId}.ssh.session.reordered`, sessionReorderedHandler);
-      eb.registerHandler(`ssh.out.${userId}.ssh.widget.layout`, widgetLayoutHandler);
-      eb.registerHandler(`ssh.out.${userId}.ssh.viewmode.sync`, viewModeSyncHandler);
     };
+
+    const unsubs = [
+      registerHandler(`ssh.out.${userId}.ssh.session.progress`, progressHandler),
+      registerHandler(`ssh.out.${userId}.ssh.session.created`, sessionCreatedHandler),
+      registerHandler(`ssh.out.${userId}.ssh.session.terminated`, sessionTerminatedHandler),
+      registerHandler(`ssh.out.${userId}.ssh.session.reordered`, sessionReorderedHandler),
+      registerHandler(`ssh.out.${userId}.ssh.widget.layout`, widgetLayoutHandler),
+      registerHandler(`ssh.out.${userId}.ssh.viewmode.sync`, viewModeSyncHandler)
+    ];
 
     const checkAuth = () => {
       fetch('/api/user')
@@ -788,14 +800,7 @@ function App() {
       unsubOpen();
       unsubClose();
       unsubError();
-      if (eb.state === EventBus.OPEN && userId) {
-        eb.unregisterHandler(`ssh.out.${userId}.ssh.session.progress`, progressHandler);
-        eb.unregisterHandler(`ssh.out.${userId}.ssh.session.created`, sessionCreatedHandler);
-        eb.unregisterHandler(`ssh.out.${userId}.ssh.session.terminated`, sessionTerminatedHandler);
-        eb.unregisterHandler(`ssh.out.${userId}.ssh.session.reordered`, sessionReorderedHandler);
-        eb.unregisterHandler(`ssh.out.${userId}.ssh.widget.layout`, widgetLayoutHandler);
-        eb.unregisterHandler(`ssh.out.${userId}.ssh.viewmode.sync`, viewModeSyncHandler);
-      }
+      unsubs.forEach(unsub => unsub());
     };
   }, [userId]);
 
@@ -1375,7 +1380,7 @@ function App() {
             }}
             className="terminal-header"
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} className="no-drag">
+            <div className="terminal-header-sidebar-tools no-drag">
                 <button 
                     onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
                     onAuxClick={(e) => {
@@ -1383,110 +1388,16 @@ function App() {
                             setIsSidebarCollapsed(false);
                         }
                     }}
-                    className="sidebar-toggle no-drag"
                     title={isSidebarCollapsed ? "Развернуть список" : "Свернуть список"}
-                    style={isEmpty ? { visibility: 'hidden' } : {}}
+                    className={`sidebar-toggle no-drag ${isEmpty ? 'hidden' : ''}`}
                     disabled={isEmpty}
                 >
                 {isSidebarCollapsed ? '☰' : '◂'}
                 </button>
-
-                {taskArray.length > 0 && (
-                    <div className="tasks-widget-container" style={{ position: 'relative' }}>
-                    <button 
-                        className={`tasks-toggle-btn ${showTasks ? 'active' : ''} no-drag`}
-                        onClick={() => setShowTasks(!showTasks)}
-                        title="Задания копирования"
-                        style={{
-                        background: 'transparent',
-                        border: 'none',
-                        color: taskArray.some(([_, t]) => t.status === 'error') ? '#e81123' : 
-                                taskArray.some(([_, t]) => t.status === 'copying' || t.status === 'starting') ? '#007acc' : '#888',
-                        cursor: 'pointer',
-                        padding: '4px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        fontSize: '14px'
-                        }}
-                    >
-                        <span>📁</span>
-                        <span style={{ fontSize: '12px', fontWeight: 'bold' }}>{taskArray.length}</span>
-                    </button>
-
-                    {showTasks && (
-                        <div className="tasks-panel-dropdown no-drag" style={{
-                        position: 'absolute',
-                        top: '100%',
-                        left: 0,
-                        width: '300px',
-                        background: '#252526',
-                        border: '1px solid #444',
-                        borderRadius: '6px',
-                        boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
-                        zIndex: 1000,
-                        marginTop: '8px',
-                        textAlign: 'left'
-                        }}>
-                        <div className="tasks-header" style={{
-                            padding: '10px 12px',
-                            background: '#333',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            fontSize: '13px',
-                            fontWeight: 'bold',
-                            borderBottom: '1px solid #444',
-                            borderRadius: '6px 6px 0 0'
-                        }}>
-                            <span>Задания ({taskArray.length})</span>
-                            <button className="no-drag" onClick={() => setShowTasks(false)} style={{ background: 'transparent', border: 'none', color: '#888', cursor: 'pointer', fontSize: '16px' }}>✕</button>
-                        </div>
-                        <div className="tasks-list" style={{ overflowY: 'auto', maxHeight: '400px', padding: '12px' }}>
-                            {taskArray.map(([id, task]) => (
-                            <div key={id} className="task-item" style={{ marginBottom: '15px' }}>
-                                <div className="task-info" style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px', color: '#ccc' }}>
-                                <span className="task-name" title={task.srcPath} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '200px' }}>
-                                    {task.srcPath.split('/').pop()}
-                                </span>
-                                <span className="task-percent" style={{ fontWeight: 'bold', color: '#007acc' }}>{task.percent}%</span>
-                                </div>
-                                <div className="task-progress-bg" style={{ height: '6px', background: '#1e1e1e', borderRadius: '3px', overflow: 'hidden' }}>
-                                <div className="task-progress-fill" style={{ 
-                                    height: '100%',
-                                    width: `${task.percent}%`,
-                                    transition: 'width 0.3s ease',
-                                    backgroundColor: task.status === 'error' ? '#e81123' : (task.status === 'fallback' ? '#ff9800' : (task.status === 'done' ? '#4caf50' : '#007acc'))
-                                }} />
-                                </div>
-                                {task.status === 'done' && <div className="task-status-text" style={{ fontSize: '11px', color: '#4caf50', marginTop: '5px' }}>Успешно завершено</div>}
-                                {task.status === 'error' && <div className="task-error-text" style={{ fontSize: '11px', color: '#e81123', marginTop: '5px', wordBreak: 'break-all' }}>{task.error}</div>}
-                                {task.status === 'fallback' && (
-                                <div className="task-status-text" style={{ fontSize: '11px', color: '#ff9800', marginTop: '5px' }}>
-                                    Переключение на поток...
-                                    {task.error && <div className="task-error-text" style={{ marginTop: 2 }}>{task.error}</div>}
-                                </div>
-                                )}
-                                {task.hadError && task.status === 'done' && task.error && (
-                                <div className="task-error-text" style={{ marginTop: 2, color: '#aaa', fontSize: '11px' }}>
-                                    Была ошибка: {task.error}
-                                </div>
-                                )}
-                            </div>
-                            ))}
-                        </div>
-                        <div className="tasks-footer" style={{ padding: '8px 12px', borderTop: '1px solid #444', textAlign: 'right' }}>
-                            <button className="no-drag" onClick={() => setTasks({})} style={{ fontSize: '11px', background: 'transparent', border: 'none', color: '#007acc', cursor: 'pointer' }}>Очистить всё</button>
-                        </div>
-                        </div>
-                    )}
-                    </div>
-                )}
             </div>
             <div className="terminal-header-center">
               <span 
-                className="terminal-header-title"
-                style={isEmpty ? { flex: 1 } : {}}
+                className={`terminal-header-title ${isEmpty ? 'is-empty' : ''}`}
               >
                 {isEmpty ? 'SEARCH SERVERS' : (() => {
                   if (!activeTabData) return 'TERMINALS';
@@ -1529,17 +1440,16 @@ function App() {
                         }
                     }}
                   >FILES</button>
-                  {activeTabData?.viewMode === 'files' && (
-                    <button 
-                      className="header-tab pin-btn"
-                      title="Pin current files view"
-                      onClick={() => setPinnedFilesTab({ 
-                          sessionId: activeTab, 
-                          serverId: activeTabData.serverId,
-                          path: activeTabData.currentPath || '.' 
-                      })}
-                    >📌</button>
-                  )}
+                {activeTabData?.viewMode === 'files' && (
+                  <div className="files-tools no-drag">
+                    <TasksWidget 
+                        tasks={tasks} 
+                        setTasks={setTasks} 
+                        showTasks={showTasks} 
+                        setShowTasks={setShowTasks} 
+                    />
+                  </div>
+                )}
                 </div>
               )}
             </div>
@@ -1706,10 +1616,17 @@ function App() {
                                 onPinPathChange={(path) => setPinnedFilesTab(prev => prev ? { ...prev, path } : null)}
                                 onPinRestore={() => pinnedTabData && restoreSession(pinnedTabData.id)}
                                 onPinClose={() => setPinnedFilesTab(null)}
-                                tasks={tasks}
-                                setTasks={setTasks}
-                                showTasks={showTasks}
-                                setShowTasks={setShowTasks}
+                                onPinToggle={(data) => {
+                                    if (pinnedFilesTab?.sessionId === data.sessionId) {
+                                        setPinnedFilesTab(null);
+                                    } else {
+                                        setPinnedFilesTab(data);
+                                    }
+                                }}
+                                tasks={tasks} 
+                                setTasks={setTasks} 
+                                showTasks={showTasks} 
+                                setShowTasks={setShowTasks} 
                             />
                           ) : (
                             <SshTerminal sessionId={tab.id} userId={userId} status={tab.status} onRestore={() => restoreSession(tab.id)} />

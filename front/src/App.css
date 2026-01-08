@@ -121,11 +121,25 @@ html, body, #root {
   color: white;
 }
 
+.sidebar-toggle.hidden {
+  visibility: hidden;
+}
+
+.terminal-header-sidebar-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .terminal-header-title {
   font-size: 12px;
   color: #888;
   font-weight: bold;
   letter-spacing: 1px;
+}
+
+.terminal-header-title.is-empty {
+  flex: 1;
 }
 
 .terminal-header-user-info {
@@ -365,6 +379,7 @@ html, body, #root {
 .tab-action-icon:hover {
   opacity: 1;
 }
+
 
 .tab-close-icon {
   cursor: pointer;
@@ -673,7 +688,6 @@ html, body, #root {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
 }
 
 .header-tabs {
@@ -686,11 +700,16 @@ html, body, #root {
   background: transparent;
   border: 1px solid #444;
   color: #888;
-  padding: 2px 10px;
+  padding: 0 10px;
   font-size: 10px;
   cursor: pointer;
   transition: all 0.2s;
   border-radius: 4px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
 }
 
 .header-tab:hover {
@@ -701,6 +720,16 @@ html, body, #root {
 .header-tab.active {
   border-color: #00ff00;
   color: #00ff00;
+}
+
+.files-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  padding-left: 4px;
+  border-left: 1px solid #444;
+  height: 20px;
 }
 
 .docker-view {

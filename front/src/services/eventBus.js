@@ -8,10 +8,21 @@ const ebHandlers = {
   error: new Set()
 };
 
+const busHandlers = new Set();
+
 const setupEb = (instance) => {
   instance.onopen = () => {
     console.log('EventBus connected');
     ebHandlers.open.forEach(cb => cb());
+    
+    // Re-register all handlers when bus is open
+    busHandlers.forEach(({ address, handler }) => {
+        try {
+            eb.registerHandler(address, handler);
+        } catch (e) {
+            console.error('Failed to register handler', address, e);
+        }
+    });
   };
   instance.onclose = (e) => {
     console.warn('EventBus closed', e);
@@ -37,6 +48,30 @@ export const subscribeEb = (event, cb) => {
     cb();
   }
   return () => ebHandlers[event].delete(cb);
+};
+
+export const registerHandler = (address, handler) => {
+    const item = { address, handler };
+    busHandlers.add(item);
+    
+    if (eb.state === EventBus.OPEN) {
+        try {
+            eb.registerHandler(address, handler);
+        } catch (e) {
+            console.error('Immediate registration failed', address, e);
+        }
+    }
+    
+    return () => {
+        busHandlers.delete(item);
+        if (eb.state === EventBus.OPEN) {
+            try {
+                eb.unregisterHandler(address, handler);
+            } catch (e) {
+                // Ignore errors on unregister
+            }
+        }
+    };
 };
 
 export { EventBus };

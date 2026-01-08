@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { eb, subscribeEb, EventBus } from '../services/eventBus';
+import { eb, subscribeEb, EventBus, registerHandler } from '../services/eventBus';
 
 const SshTerminal = ({ sessionId, userId, status, onRestore }) => {
   const terminalRef = useRef(null);
@@ -37,9 +37,9 @@ const SshTerminal = ({ sessionId, userId, status, onRestore }) => {
       }
     };
 
+    const unregister = registerHandler(`ssh.out.${userId}.ssh.command.out`, handler);
+
     const setupHandlers = () => {
-      eb.registerHandler(`ssh.out.${userId}.ssh.command.out`, handler);
-      
       // Запрашиваем историю при подключении
       eb.send('ssh.session.history', { sessionId }, (err, res) => {
         if (!err && res && res.body && res.body.history) {
@@ -67,9 +67,7 @@ const SshTerminal = ({ sessionId, userId, status, onRestore }) => {
 
     return () => {
       unsub();
-      if (eb.state === EventBus.OPEN) {
-        eb.unregisterHandler(`ssh.out.${userId}.ssh.command.out`, handler);
-      }
+      unregister();
       observer.disconnect();
       term.dispose();
     };

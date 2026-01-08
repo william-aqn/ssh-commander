@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { eb } from '../services/eventBus';
+import { eb, registerHandler } from '../services/eventBus';
 
-const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverName, onPathChange, onRestore, isPinned, onPinClose, onDropFiles }) => {
+const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverName, onPathChange, onRestore, isPinned, onPinClose, onDropFiles, onPinToggle, isCurrentlyPinned }) => {
   const [files, setFiles] = useState([]);
   const [diskInfo, setDiskInfo] = useState(null);
   const [currentPath, setCurrentPath] = useState(initialPath || '.');
@@ -94,8 +94,7 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
     };
     
     const addr = `ssh.out.${userId}.files.changed`;
-    eb.registerHandler(addr, handler);
-    return () => eb.unregisterHandler(addr, handler);
+    return registerHandler(addr, handler);
   }, [userId, serverId, status, currentPath, fetchFiles]);
 
   const navigateTo = (name) => {
@@ -282,6 +281,15 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
             <button onClick={() => fileInputRef.current?.click()} title="Загрузить файлы">📤</button>
             <input type="file" ref={fileInputRef} style={{ display: 'none' }} multiple onChange={(e) => handleUploadFiles(e.target.files)} />
             <button onClick={() => fetchFiles()} title="Refresh">🔄</button>
+            {!isPinned && onPinToggle && (
+                <button 
+                  className={`pin-panel-btn ${isCurrentlyPinned ? 'active' : ''}`}
+                  onClick={() => onPinToggle({ sessionId, serverId, path: currentPath })}
+                  title={isCurrentlyPinned ? "Открепить панель" : "Закрепить панель"}
+                >
+                  📌
+                </button>
+            )}
             {isPinned && <button className="pin-close-btn" onClick={onPinClose} title="Закрыть панель">✕</button>}
         </div>
       </div>
@@ -292,7 +300,19 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
             <button onClick={onRestore} className="retry-button">Разбудить сессию</button>
         </div>
       ) : (
-        <div className="files-table-container">
+        <div 
+            className="files-table-container" 
+            onContextMenu={(e) => {
+                if (e.target === e.currentTarget || e.target.tagName === 'TABLE' || e.target.tagName === 'TBODY' || e.target.tagName === 'THEAD') {
+                    setContextMenu(null);
+                }
+            }}
+            onClick={(e) => {
+                if (e.target === e.currentTarget || e.target.tagName === 'TABLE' || e.target.tagName === 'TBODY' || e.target.tagName === 'THEAD') {
+                    setContextMenu(null);
+                }
+            }}
+        >
             <table className="files-table">
             <thead>
                 <tr>
@@ -370,7 +390,7 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
 const FilesView = ({ 
     sessionId, userId, status, path: pathProp, serverId, serverName, onRestore, onPathChange, 
     pinnedTab, pinnedStatus, pinnedServerId, pinnedServerName, onPinPathChange, onPinRestore, onPinClose,
-    tasks, setTasks, showTasks, setShowTasks
+    tasks, setTasks, showTasks, setShowTasks, onPinToggle
 }) => {
   const [copyData, setCopyData] = useState(null); // { dragData, targetPath, targetSessionId, targetServerName }
   const [copyMethod, setCopyMethod] = useState(() => localStorage.getItem('files_copy_method') || 'stream');
@@ -498,6 +518,8 @@ const FilesView = ({
                 onPathChange={onPathChange}
                 onRestore={onRestore}
                 onDropFiles={(data, path) => handleDropFiles(data, path, sessionId, serverName)}
+                onPinToggle={onPinToggle}
+                isCurrentlyPinned={pinnedTab?.sessionId === sessionId}
             />
             {pinnedTab && (
                 <FilePanel 
