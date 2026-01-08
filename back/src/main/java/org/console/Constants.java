@@ -36,6 +36,7 @@ public class Constants {
     public static final String FILES_MKDIR = "files.mkdir";
     public static final String FILES_DELETE = "files.delete";
     public static final String FILES_CHMOD = "files.chmod";
+    public static final String FILES_RENAME = "files.rename";
     public static final String FILES_COPY = "files.copy";
     public static final String FILES_COPY_PROGRESS = ".files.copy.progress";
     public static final String FILES_CHANGED = ".files.changed";

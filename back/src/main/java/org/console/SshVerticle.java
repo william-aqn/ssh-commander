@@ -704,6 +704,35 @@ public class SshVerticle extends AbstractVerticle {
                 .onFailure(err -> message.fail(500, err.getMessage()));
         });
 
+        vertx.eventBus().<JsonObject>consumer(FILES_RENAME, message -> {
+            JsonObject body = message.body();
+            String oldPath = body.getString("oldPath");
+            String newPath = body.getString("newPath");
+            String sessionId = body.getString("sessionId");
+            String userId = body.getString(SESSION_USER_ID);
+
+            String serverId = getServerId(sessionId, userId);
+            if (serverId == null) {
+                message.fail(403, "Access denied");
+                return;
+            }
+
+            Session jschSession = getAnyActiveJschSession(serverId);
+            if (jschSession == null) {
+                message.fail(503, "SSH session not active");
+                return;
+            }
+
+            String command = String.format("mv %s %s", ShellUtils.sanitize(oldPath), ShellUtils.sanitize(newPath));
+            executeCommand(jschSession, command)
+                .onSuccess(v -> {
+                    message.reply(new JsonObject().put("status", "ok"));
+                    notifyFilesChanged(userId, serverId, oldPath);
+                    notifyFilesChanged(userId, serverId, newPath);
+                })
+                .onFailure(err -> message.fail(500, err.getMessage()));
+        });
+
         vertx.eventBus().<JsonObject>consumer(FILES_COPY, message -> {
             JsonObject body = message.body();
             String srcPath = body.getString("srcPath");

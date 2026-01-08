@@ -14,7 +14,12 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
   const [isDragOver, setIsDragOver] = useState(false);
   const [contextMenu, setContextMenu] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [selectionMask, setSelectionMask] = useState(() => localStorage.getItem('files_selection_mask') || '*');
   const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    localStorage.setItem('files_selection_mask', selectionMask);
+  }, [selectionMask]);
 
   useEffect(() => {
     if (onPathChange) onPathChange(currentPath);
@@ -238,6 +243,35 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
     });
   };
 
+  const handleRename = (file) => {
+    const newName = prompt('Введите новое имя:', file.name);
+    if (!newName || newName === file.name) return;
+    const oldPath = getFullPath(file.name);
+    const newPath = getFullPath(newName);
+    setLoading(true);
+    eb.send('files.rename', { sessionId, userId, oldPath, newPath }, (err, res) => {
+      setLoading(false);
+      if (!err && res && res.body && res.body.status === 'ok') fetchFiles();
+      else alert('Ошибка при переименовании: ' + (err ? err.message : 'Unknown error'));
+    });
+  };
+
+  const selectByMask = () => {
+    try {
+      const pattern = selectionMask.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+      const regex = new RegExp('^' + pattern + '$');
+      const next = new Set();
+      files.forEach(f => {
+        if (regex.test(f.name)) {
+          next.add(getFullPath(f.name));
+        }
+      });
+      setSelectedPaths(next);
+    } catch (e) {
+      alert('Некорректная маска');
+    }
+  };
+
   const sortedFiles = React.useMemo(() => {
     let sortableFiles = [...files];
     if (sortConfig !== null) {
@@ -277,6 +311,16 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
             <span className="panel-server-name">{serverName}</span>: {currentPath}
         </div>
         <div className="files-actions" style={{padding: 0, border: 'none'}}>
+            <div className="mask-selection" style={{ display: 'inline-flex', alignItems: 'center', marginRight: 8, border: '1px solid #444', borderRadius: 4, padding: '0 4px', height: 24 }}>
+                <input 
+                    type="text" 
+                    value={selectionMask} 
+                    onChange={(e) => setSelectionMask(e.target.value)} 
+                    placeholder="Маска (*)"
+                    style={{ width: 60, border: 'none', background: 'transparent', outline: 'none', color: 'inherit', fontSize: '12px' }}
+                />
+                <button onClick={selectByMask} title="Выделить по маске" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px', fontSize: '12px' }}>✅</button>
+            </div>
             <button onClick={handleCreateDir} title="Создать директорию">📁+</button>
             <button onClick={() => fileInputRef.current?.click()} title="Загрузить файлы">📤</button>
             <input type="file" ref={fileInputRef} style={{ display: 'none' }} multiple onChange={(e) => handleUploadFiles(e.target.files)} />
@@ -366,6 +410,7 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
       {contextMenu && createPortal(
         <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }} onClick={() => setContextMenu(null)}>
           <div className="context-menu-item" onClick={() => handleDownload(contextMenu.file.name, contextMenu.file.isDir)}>⬇️ Скачать</div>
+          <div className="context-menu-item" onClick={() => handleRename(contextMenu.file)}>✏️ Переименовать</div>
           <div className="context-menu-item" onClick={() => handleChmod(contextMenu.file)}>🔑 Права (chmod)</div>
           <div className="context-menu-divider" />
           <div className="context-menu-item delete" onClick={() => setDeleteConfirm({ paths: [getFullPath(contextMenu.file.name)], message: `Удалить "${contextMenu.file.name}"?` })}>🗑️ Удалить</div>
