@@ -73,6 +73,30 @@ function App() {
   const [showTasks, setShowTasks] = useState(false);
 
   useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.ctrlKey && e.code === 'KeyW') {
+        e.preventDefault();
+      }
+    };
+
+    const handleBeforeUnload = (e) => {
+      if (tabs.length > 0) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [tabs.length]);
+
+  useEffect(() => {
     if (!userId) return;
     const handler = (err, msg) => {
       if (msg && msg.body) {
@@ -500,6 +524,7 @@ function App() {
   };
 
   useEffect(() => {
+    if (!userId) return;
     const progressHandler = (err, msg) => {
       if (msg && msg.body) {
         const { sessionId, message } = msg.body;

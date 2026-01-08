@@ -22,6 +22,18 @@ const SshTerminal = ({ sessionId, userId, status, onRestore }) => {
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(terminalRef.current);
+
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.ctrlKey && event.code === 'KeyW' && event.type === 'keydown') {
+        event.preventDefault();
+        if (eb.state === EventBus.OPEN) {
+          eb.publish('ssh.command.in', { sessionId, data: '\x17' });
+        }
+        return false;
+      }
+      return true;
+    });
+
     fitAddon.fit();
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
