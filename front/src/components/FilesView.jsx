@@ -32,11 +32,6 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
     }
   }, [initialPath]);
 
-  useEffect(() => {
-    if (status === 'restorable' && onRestore) {
-      onRestore();
-    }
-  }, [status, onRestore]);
 
   const calculateDirectorySizes = (path = currentPath) => {
     if (status !== 'connected') return;

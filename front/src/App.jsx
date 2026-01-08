@@ -981,34 +981,47 @@ function App() {
   };
 
   useEffect(() => {
-    if (connected && sessionsLoaded && activeTab) {
-        const tab = tabs.find(t => t.id === activeTab);
-        if (tab) {
-            if (tab.status === 'restorable') {
-                restoreSession(activeTab);
+    if (connected && sessionsLoaded && !detachedSessionId) {
+        if (activeTab) {
+            const tab = tabs.find(t => t.id === activeTab);
+            if (tab) {
+                if (tab.status === 'restorable') {
+                    restoreSession(activeTab);
+                }
+            } else if (availableServers.length > 0) {
+                // Если активный таб не найден в списке, значит мы перешли по истории ("Назад") 
+                // к сессии, которая была закрыта. Пробуем восстановить по serverId из URL.
+                const params = new URLSearchParams(window.location.search);
+                const urlTabId = params.get('tab');
+                const urlServerId = params.get('server');
+                
+                if (activeTab === urlTabId && urlServerId) {
+                    const existingTab = tabs.find(t => t.serverId === urlServerId && !t.isDocker);
+                    if (existingTab) {
+                        console.log('Переключение на существующий таб для сервера:', urlServerId);
+                        setActiveTab(existingTab.id);
+                    } else {
+                        const urlMode = params.get('mode') || 'terminal';
+                        const urlPath = params.get('path') || '.';
+                        console.log('Воссоздание сессии из истории для сервера:', urlServerId);
+                        createSession(urlServerId, null, null, urlMode, urlPath);
+                    }
+                }
             }
-        } else if (availableServers.length > 0) {
-            // Если активный таб не найден в списке, значит мы перешли по истории ("Назад") 
-            // к сессии, которая была закрыта. Пробуем восстановить по serverId из URL.
-            const params = new URLSearchParams(window.location.search);
-            const urlTabId = params.get('tab');
-            const urlServerId = params.get('server');
-            
-            if (activeTab === urlTabId && urlServerId) {
-                const existingTab = tabs.find(t => t.serverId === urlServerId && !t.isDocker);
-                if (existingTab) {
-                    console.log('Переключение на существующий таб для сервера:', urlServerId);
-                    setActiveTab(existingTab.id);
-                } else {
-                    const urlMode = params.get('mode') || 'terminal';
-                    const urlPath = params.get('path') || '.';
-                    console.log('Воссоздание сессии из истории для сервера:', urlServerId);
-                    createSession(urlServerId, null, null, urlMode, urlPath);
+        }
+
+        // Также восстанавливаем закрепленный таб, если он в статусе restorable и видим (активен FilesView в основном окне)
+        if (pinnedFilesTab && activeTab !== pinnedFilesTab.sessionId) {
+            const activeTabData = tabs.find(t => t.id === activeTab);
+            if (activeTabData && activeTabData.viewMode === 'files') {
+                const pinnedTab = tabs.find(t => t.id === pinnedFilesTab.sessionId);
+                if (pinnedTab && pinnedTab.status === 'restorable') {
+                    restoreSession(pinnedFilesTab.sessionId);
                 }
             }
         }
     }
-  }, [activeTab, connected, tabs, availableServers, sessionsLoaded]);
+  }, [activeTab, connected, tabs, availableServers, sessionsLoaded, pinnedFilesTab, detachedSessionId]);
 
   useEffect(() => {
     if (connected && detachedSessionId) {
