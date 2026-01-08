@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { eb, registerHandler } from '../services/eventBus';
 
-const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverName, onPathChange, onRestore, isPinned, onPinClose, onDropFiles, onPinToggle, isCurrentlyPinned }) => {
+const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverName, onPathChange, onRestore, isPinned, onPinClose, onDropFiles, onPinToggle, isCurrentlyPinned, onCopy }) => {
   const [files, setFiles] = useState([]);
   const [diskInfo, setDiskInfo] = useState(null);
   const [currentPath, setCurrentPath] = useState(initialPath || '.');
@@ -191,10 +191,8 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
     if (jsonData) {
         try {
             const dragData = JSON.parse(jsonData);
-            if (dragData.sessionId !== sessionId || dragData.paths.some(p => !p.startsWith(currentPath))) {
-                onDropFiles(dragData, currentPath);
-                return;
-            }
+            onDropFiles(dragData, currentPath);
+            return;
         } catch (e) {}
     }
 
@@ -405,6 +403,7 @@ const FilePanel = ({ sessionId, userId, status, initialPath, serverId, serverNam
       {contextMenu && createPortal(
         <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }} onClick={() => setContextMenu(null)}>
           <div className="context-menu-item" onClick={() => handleDownload(contextMenu.file.name, contextMenu.file.isDir)}>⬇️ Скачать</div>
+          <div className="context-menu-item" onClick={() => onCopy(getFullPath(contextMenu.file.name))}>📋 Копировать</div>
           <div className="context-menu-item" onClick={() => handleRename(contextMenu.file)}>✏️ Переименовать</div>
           <div className="context-menu-item" onClick={() => handleChmod(contextMenu.file)}>🔑 Права (chmod)</div>
           <div className="context-menu-divider" />
@@ -456,6 +455,10 @@ const FilesView = ({
   }, [copyData, userId]);
 
   const handleDropFiles = (dragData, targetPath, targetSessionId, targetServerName) => {
+    if (dragData.paths.length === 1 && dragData.sourcePath === targetPath && dragData.serverName === targetServerName) {
+        handleSingleCopy(targetSessionId, dragData.paths[0]);
+        return;
+    }
     setCopyData({ dragData, targetPath, targetSessionId, targetServerName });
   };
 
@@ -505,6 +508,48 @@ const FilesView = ({
                 });
             }
         });
+    });
+  };
+
+  const handleSingleCopy = (srcSessionId, srcPath) => {
+    const newPath = prompt('Скопировать в (путь и название):', srcPath);
+    if (!newPath || newPath === srcPath) return;
+
+    const taskId = Math.random().toString(36).substring(2, 9);
+    setShowTasks(true);
+    setTasks(prev => ({
+        ...prev,
+        [taskId]: { srcPath, status: 'starting', percent: 0 }
+    }));
+
+    eb.send('files.copy', {
+        srcPath,
+        destPath: newPath,
+        srcSessionId: srcSessionId,
+        destSessionId: srcSessionId,
+        userId,
+        taskId,
+        method: 'local'
+    }, (err, res) => {
+        if (err) {
+            setTasks(prev => ({
+                ...prev,
+                [taskId]: { ...prev[taskId], status: 'error', error: err.message, percent: 0 }
+            }));
+        } else {
+            setTasks(prev => {
+                const currentTask = prev[taskId];
+                if (currentTask && (currentTask.status === 'error' || currentTask.hadError)) {
+                    return {
+                        ...prev,
+                        [taskId]: { ...currentTask, status: 'done', percent: 100 }
+                    };
+                }
+                const next = { ...prev };
+                delete next[taskId];
+                return next;
+            });
+        }
     });
   };
 
@@ -560,6 +605,7 @@ const FilesView = ({
                 onDropFiles={(data, path) => handleDropFiles(data, path, sessionId, serverName)}
                 onPinToggle={onPinToggle}
                 isCurrentlyPinned={pinnedTab?.sessionId === sessionId}
+                onCopy={(srcPath) => handleSingleCopy(sessionId, srcPath)}
             />
             {pinnedTab && (
                 <FilePanel 
@@ -574,6 +620,7 @@ const FilesView = ({
                     isPinned
                     onPinClose={onPinClose}
                     onDropFiles={(data, path) => handleDropFiles(data, path, pinnedTab.sessionId, pinnedServerName)}
+                    onCopy={(srcPath) => handleSingleCopy(pinnedTab.sessionId, srcPath)}
                 />
             )}
         </div>

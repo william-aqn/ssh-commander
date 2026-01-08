@@ -867,6 +867,156 @@ html, body, #root {
   color: #ff5555;
 }
 
+.env-modal {
+  /* position, width, height, transform are handled inline in DockerView.jsx */
+  max-width: none;
+}
+
+.env-modal.is-maximized {
+  width: 100vw !important;
+  height: 100vh !important;
+  transform: none !important;
+  left: 0 !important;
+  top: 0 !important;
+  border-radius: 0 !important;
+  max-width: none !important;
+  z-index: 2001;
+}
+
+.env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  background: #252526;
+  border-radius: 4px;
+}
+
+.env-item {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.env-item input {
+  background: #333;
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 5px 8px;
+  border-radius: 4px;
+  flex: 1;
+}
+
+.env-item input:focus {
+  outline: none;
+  border-color: #007acc;
+}
+
+.env-item span {
+  color: #888;
+}
+
+.delete-env-btn {
+  background: transparent;
+  border: none;
+  color: #ff5555;
+  cursor: pointer;
+  font-size: 18px;
+  padding: 0 5px;
+}
+
+.add-env-btn {
+  background: transparent;
+  border: 1px dashed #444;
+  color: #888;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  width: auto;
+}
+
+.add-env-btn:hover {
+  background: #333;
+  color: #ccc;
+  border-color: #666;
+}
+
+/* Modal Resizer Styles */
+.modal-resizer {
+  position: absolute;
+  z-index: 1000;
+}
+
+.modal-resizer.r {
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: e-resize;
+}
+
+.modal-resizer.l {
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: w-resize;
+}
+
+.modal-resizer.b {
+  bottom: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: s-resize;
+}
+
+.modal-resizer.t {
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: n-resize;
+}
+
+.modal-resizer.rb {
+  right: -3px;
+  bottom: -3px;
+  width: 10px;
+  height: 10px;
+  cursor: se-resize;
+  z-index: 1001;
+}
+
+.modal-resizer.lb {
+  left: -3px;
+  bottom: -3px;
+  width: 10px;
+  height: 10px;
+  cursor: sw-resize;
+  z-index: 1001;
+}
+
+.modal-resizer.rt {
+  right: -3px;
+  top: -3px;
+  width: 10px;
+  height: 10px;
+  cursor: ne-resize;
+  z-index: 1001;
+}
+
+.modal-resizer.lt {
+  left: -3px;
+  top: -3px;
+  width: 10px;
+  height: 10px;
+  cursor: nw-resize;
+  z-index: 1001;
+}
+
 .files-view {
   height: 100%;
   background: #1e1e1e;
@@ -1372,6 +1522,8 @@ html, body, #root {
 }
 
 .chart-zoom-body {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   padding: 20px;
   background: #000;
@@ -1383,6 +1535,7 @@ html, body, #root {
   border-top: 1px solid #333;
   display: flex;
   justify-content: flex-end;
+  gap: 10px;
 }
 
 .download-button {

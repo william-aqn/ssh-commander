@@ -590,7 +590,8 @@ public class SshVerticle extends AbstractVerticle {
             DOCKER_CONTAINERS_LIST, new String[]{"GET", "/containers/json?all=true"},
             DOCKER_CONTAINER_STATS, new String[]{"GET", "/containers/%s/stats?stream=false"},
             DOCKER_CONTAINER_RESTART, new String[]{"POST", "/containers/%s/restart"},
-            DOCKER_CONTAINER_LOGS, new String[]{"GET", "/containers/%s/logs?stdout=true&stderr=true&timestamps=%s&tail=%s"}
+            DOCKER_CONTAINER_LOGS, new String[]{"GET", "/containers/%s/logs?stdout=true&stderr=true&timestamps=%s&tail=%s"},
+            DOCKER_CONTAINER_INSPECT, new String[]{"GET", "/containers/%s/json"}
         );
 
         endpoints.forEach((address, params) -> {
@@ -614,6 +615,10 @@ public class SshVerticle extends AbstractVerticle {
                 }
                 dispatchDockerRequest(body.getString("sessionId"), body.getString(SESSION_USER_ID), params[0], path, null, message);
             });
+        });
+
+        vertx.eventBus().<JsonObject>consumer(DOCKER_CONTAINER_UPDATE_ENV, message -> {
+            handleDockerUpdateEnv(message);
         });
     }
 
@@ -1317,10 +1322,16 @@ public class SshVerticle extends AbstractVerticle {
     }
 
     private void dispatchDockerRequest(String sessionId, String userId, String method, String path, String body, io.vertx.core.eventbus.Message<JsonObject> message) {
+        boolean isLogRequest = path.contains("/logs?");
+        dispatchDockerRequestInternal(sessionId, userId, method, path, body)
+            .onSuccess(data -> replyWithDockerData(message, data, !isLogRequest))
+            .onFailure(err -> message.fail(500, err.getMessage()));
+    }
+
+    private Future<String> dispatchDockerRequestInternal(String sessionId, String userId, String method, String path, String body) {
         String serverId = getServerId(sessionId, userId);
         if (serverId == null) {
-            message.fail(403, "Доступ запрещен или сессия не найдена");
-            return;
+            return Future.failedFuture("Доступ запрещен или сессия не найдена");
         }
 
         boolean cacheable = "GET".equalsIgnoreCase(method);
@@ -1332,28 +1343,19 @@ public class SshVerticle extends AbstractVerticle {
             JsonObject cached = dockerCache.get(cacheKey);
             if (cached != null && System.currentTimeMillis() - cached.getLong("timestamp") < 3000) {
                 logger.debug("Returning cached Docker API response for server {}: {} {}", serverId, method, path);
-                replyWithDockerData(message, cached.getString("data"), !isLogRequest);
-                return;
+                return Future.succeededFuture(cached.getString("data"));
             }
 
             Future<String> pending = pendingDockerRequests.get(cacheKey);
             if (pending != null) {
                 logger.debug("Collapsing Docker API request for server {}: {} {}", serverId, method, path);
-                pending.onComplete(ar -> {
-                    if (ar.succeeded()) {
-                        replyWithDockerData(message, ar.result(), !isLogRequest);
-                    } else {
-                        message.fail(500, ar.cause().getMessage());
-                    }
-                });
-                return;
+                return pending;
             }
         }
 
         Session jschSession = getAnyActiveJschSession(serverId);
         if (jschSession == null) {
-            message.fail(503, "Нет активного SSH-соединения с сервером. Пожалуйста, подключитесь или разбудите сессию.");
-            return;
+            return Future.failedFuture("Нет активного SSH-соединения с сервером. Пожалуйста, подключитесь или разбудите сессию.");
         }
 
         Promise<String> promise = Promise.promise();
@@ -1372,12 +1374,23 @@ public class SshVerticle extends AbstractVerticle {
                 }
                 ChannelExec channel = (ChannelExec) jschSession.openChannel("exec");
                 String fullUrl = "http://localhost" + path;
-                String command = String.format("curl -s --max-time 15 -X %s --unix-socket /var/run/docker.sock %s", 
-                        ShellUtils.sanitize(method), ShellUtils.sanitize(fullUrl));
-                channel.setCommand(command);
+                
+                String curlCmd;
+                if (body != null && !body.isEmpty()) {
+                    // Используем временный файл для передачи body, чтобы избежать проблем с кавычками в shell
+                    String escapedBody = body.replace("'", "'\\''");
+                    long ts = System.currentTimeMillis();
+                    curlCmd = String.format("echo '%s' > /tmp/docker_body_%d.json; curl -s --max-time 30 -X %s -H \"Content-Type: application/json\" --data @/tmp/docker_body_%d.json --unix-socket /var/run/docker.sock %s; rm /tmp/docker_body_%d.json",
+                            escapedBody, ts, ShellUtils.sanitize(method), ts, ShellUtils.sanitize(fullUrl), ts);
+                } else {
+                    curlCmd = String.format("curl -s --max-time 30 -X %s --unix-socket /var/run/docker.sock %s", 
+                            ShellUtils.sanitize(method), ShellUtils.sanitize(fullUrl));
+                }
+                
+                channel.setCommand(curlCmd);
                 InputStream in = channel.getInputStream();
                 InputStream err = channel.getErrStream();
-                channel.connect(10000);
+                channel.connect(15000);
 
                 byte[] responseBytes = in.readAllBytes();
                 byte[] errorBytes = err.readAllBytes();
@@ -1410,15 +1423,15 @@ public class SshVerticle extends AbstractVerticle {
                 if (cacheable) {
                     pendingDockerRequests.remove(cacheKey);
                     dockerCache.put(cacheKey, new JsonObject().put("data", processed).put("timestamp", System.currentTimeMillis()));
-                    promise.complete(processed);
                 }
-                replyWithDockerData(message, processed, !isLogRequest);
+                promise.complete(processed);
             } else {
                 if (cacheable) pendingDockerRequests.remove(cacheKey);
                 promise.fail(res.cause());
-                message.fail(500, res.cause().getMessage());
             }
         });
+
+        return promise.future();
     }
 
     private String processDockerLogs(byte[] raw) {
@@ -1804,5 +1817,82 @@ public class SshVerticle extends AbstractVerticle {
                 logger.error("Error writing to SSH session {}", sessionId, e);
             }
         }
+    }
+
+    private void handleDockerUpdateEnv(Message<JsonObject> message) {
+        JsonObject body = message.body();
+        String sessionId = body.getString("sessionId");
+        String userId = body.getString(SESSION_USER_ID);
+        String containerId = body.getString("containerId");
+        JsonArray newEnv = body.getJsonArray("env");
+
+        dispatchDockerRequestInternal(sessionId, userId, "GET", "/containers/" + containerId + "/json", null)
+            .onSuccess(inspectDataStr -> {
+                try {
+                    JsonObject inspectData = new JsonObject(inspectDataStr);
+                    JsonObject config = inspectData.getJsonObject("Config");
+                    String name = inspectData.getString("Name").replace("/", "");
+                    
+                    config.put("Env", newEnv);
+
+                    JsonObject createRequest = new JsonObject()
+                        .put("Hostname", config.getString("Hostname"))
+                        .put("Domainname", config.getString("Domainname"))
+                        .put("User", config.getString("User"))
+                        .put("AttachStdin", config.getBoolean("AttachStdin"))
+                        .put("AttachStdout", config.getBoolean("AttachStdout"))
+                        .put("AttachStderr", config.getBoolean("AttachStderr"))
+                        .put("Tty", config.getBoolean("Tty"))
+                        .put("OpenStdin", config.getBoolean("OpenStdin"))
+                        .put("StdinOnce", config.getBoolean("StdinOnce"))
+                        .put("Env", config.getJsonArray("Env"))
+                        .put("Cmd", config.getJsonArray("Cmd"))
+                        .put("Image", config.getString("Image"))
+                        .put("Volumes", config.getJsonObject("Volumes"))
+                        .put("WorkingDir", config.getString("WorkingDir"))
+                        .put("Entrypoint", config.getValue("Entrypoint"))
+                        .put("OnBuild", config.getValue("OnBuild"))
+                        .put("Labels", config.getJsonObject("Labels"))
+                        .put("HostConfig", inspectData.getJsonObject("HostConfig"));
+
+                    JsonObject networks = inspectData.getJsonObject("NetworkSettings").getJsonObject("Networks");
+                    if (networks != null && !networks.isEmpty()) {
+                        createRequest.put("NetworkingConfig", new JsonObject().put("EndpointsConfig", networks));
+                    }
+
+                    dispatchDockerRequestInternal(sessionId, userId, "POST", "/containers/" + containerId + "/stop", null)
+                        .onSuccess(v -> {
+                            String oldName = name + "_old_" + System.currentTimeMillis();
+                            dispatchDockerRequestInternal(sessionId, userId, "POST", "/containers/" + containerId + "/rename?name=" + oldName, null)
+                                .onSuccess(v2 -> {
+                                    dispatchDockerRequestInternal(sessionId, userId, "POST", "/containers/create?name=" + name, createRequest.encode())
+                                        .onSuccess(createResStr -> {
+                                            try {
+                                                String newContainerId = new JsonObject(createResStr).getString("Id");
+                                                dispatchDockerRequestInternal(sessionId, userId, "POST", "/containers/" + newContainerId + "/start", null)
+                                                    .onSuccess(v3 -> {
+                                                        dispatchDockerRequestInternal(sessionId, userId, "DELETE", "/containers/" + containerId, null)
+                                                            .onComplete(ar -> {
+                                                                message.reply(new JsonObject().put("status", "ok"));
+                                                            });
+                                                    })
+                                                    .onFailure(err -> message.fail(500, "Failed to start new container: " + err.getMessage()));
+                                            } catch (Exception e) {
+                                                message.fail(500, "Failed to parse create response: " + e.getMessage());
+                                            }
+                                        })
+                                        .onFailure(err -> {
+                                            dispatchDockerRequestInternal(sessionId, userId, "POST", "/containers/" + containerId + "/rename?name=" + name, null);
+                                            message.fail(500, "Failed to create new container: " + err.getMessage());
+                                        });
+                                })
+                                .onFailure(err -> message.fail(500, "Failed to rename old container: " + err.getMessage()));
+                        })
+                        .onFailure(err -> message.fail(500, "Failed to stop container: " + err.getMessage()));
+                } catch (Exception e) {
+                    message.fail(500, "Failed to process inspect data: " + e.getMessage());
+                }
+            })
+            .onFailure(err -> message.fail(500, "Failed to inspect container: " + err.getMessage()));
     }
 }

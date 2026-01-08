@@ -23,6 +23,19 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
   const [logHeights, setLogHeights] = useState({});
   const [chartData, setChartData] = useState({});
   const [zoomedContainerId, setZoomedContainerId] = useState(null);
+  const [editingEnv, setEditingEnv] = useState(null); // { containerId, env: [], name }
+  const [envLoading, setEnvLoading] = useState(false);
+  
+  // States for Draggable/Resizable ENV Modal
+  const [envModalPos, setEnvModalPos] = useState({ x: 0, y: 0 });
+  const [envModalSize, setEnvModalSize] = useState({ width: 600, height: 500 });
+  const [isEnvDragging, setIsEnvDragging] = useState(false);
+  const [envResizing, setEnvResizing] = useState(null);
+  const [isEnvMaximized, setIsEnvMaximized] = useState(false);
+  
+  const envDragStartOffset = useRef({ x: 0, y: 0 });
+  const envResizeStartSize = useRef({ width: 0, height: 0, x: 0, y: 0, modalX: 0, modalY: 0 });
+
   const chartRef = useRef(null);
 
 
@@ -71,6 +84,8 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
             eb.send('docker.container.stats', { sessionId, userId, containerId: c.Id }, (err, res) => {
               if (!err && res && res.body && res.body.status === 'ok') {
                 const s = res.body.data;
+                if (!s || !s.memory_stats) return;
+
                 setStats(prev => ({ ...prev, [c.Id]: s }));
                 
                 const cpuVal = parseFloat(calculateCpu(s));
@@ -227,7 +242,7 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
         onClick={onClick}
         title={isMini ? "Click to enlarge" : ""}
       >
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
           <LineChart data={data}>
             <CartesianGrid strokeDasharray="3 3" stroke="#333" vertical={false} hide={isMini} />
             <XAxis 
@@ -319,6 +334,233 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
     });
   };
 
+  const handleOpenEnv = (containerId) => {
+    setEnvLoading(true);
+    eb.send('docker.container.inspect', { sessionId, userId, containerId }, (err, res) => {
+      setEnvLoading(false);
+      if (!err && res && res.body && res.body.status === 'ok') {
+        const data = res.body.data;
+        const env = data.Config ? data.Config.Env : [];
+        setEditingEnv({ containerId, env, name: data.Name.replace(/^\//, '') });
+        
+        const initialWidth = 600;
+        const initialHeight = 500;
+        // Reset modal state to default when opening, center it
+        setEnvModalPos({ 
+          x: (window.innerWidth - initialWidth) / 2, 
+          y: (window.innerHeight - initialHeight) / 2 
+        });
+        setEnvModalSize({ width: initialWidth, height: initialHeight });
+        setIsEnvMaximized(false);
+      } else {
+        alert('Failed to get container ENV: ' + (err?.message || 'unknown error'));
+      }
+    });
+  };
+
+  const handleEnvMouseDown = (e) => {
+    if (e.button !== 0 || isEnvMaximized) return;
+    if (e.target.closest('button') || e.target.closest('.no-drag')) return;
+    setIsEnvDragging(true);
+    envDragStartOffset.current = {
+      x: e.clientX - envModalPos.x,
+      y: e.clientY - envModalPos.y
+    };
+  };
+
+  const handleEnvResizeDown = (e, type) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setEnvResizing(type);
+    envResizeStartSize.current = {
+      width: envModalSize.width,
+      height: envModalSize.height,
+      x: e.clientX,
+      y: e.clientY,
+      modalX: envModalPos.x,
+      modalY: envModalPos.y
+    };
+  };
+
+  const handleEnvTitleDoubleClick = () => {
+    setIsEnvMaximized(!isEnvMaximized);
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (isEnvDragging) {
+        setEnvModalPos({
+          x: e.clientX - envDragStartOffset.current.x,
+          y: e.clientY - envDragStartOffset.current.y
+        });
+      } else if (envResizing) {
+        const deltaX = e.clientX - envResizeStartSize.current.x;
+        const deltaY = e.clientY - envResizeStartSize.current.y;
+        
+        let newWidth = envResizeStartSize.current.width;
+        let newHeight = envResizeStartSize.current.height;
+        let newX = envResizeStartSize.current.modalX;
+        let newY = envResizeStartSize.current.modalY;
+
+        if (envResizing.includes('r')) {
+          newWidth = Math.max(300, envResizeStartSize.current.width + deltaX);
+        }
+        if (envResizing.includes('l')) {
+          newWidth = Math.max(300, envResizeStartSize.current.width - deltaX);
+          if (newWidth > 300) {
+            newX = envResizeStartSize.current.modalX + deltaX;
+          } else {
+            newX = envResizeStartSize.current.modalX + (envResizeStartSize.current.width - 300);
+          }
+        }
+        if (envResizing.includes('b')) {
+          newHeight = Math.max(200, envResizeStartSize.current.height + deltaY);
+        }
+        if (envResizing.includes('t')) {
+          newHeight = Math.max(200, envResizeStartSize.current.height - deltaY);
+          if (newHeight > 200) {
+            newY = envResizeStartSize.current.modalY + deltaY;
+          } else {
+            newY = envResizeStartSize.current.modalY + (envResizeStartSize.current.height - 200);
+          }
+        }
+
+        setEnvModalSize({ width: newWidth, height: newHeight });
+        setEnvModalPos({ x: newX, y: newY });
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsEnvDragging(false);
+      setEnvResizing(null);
+    };
+
+    if (isEnvDragging || envResizing) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isEnvDragging, envResizing]);
+
+  const handleSaveEnv = () => {
+    if (!editingEnv) return;
+    setEnvLoading(true);
+    eb.send('docker.container.update_env', { 
+      sessionId, 
+      userId, 
+      containerId: editingEnv.containerId, 
+      env: editingEnv.env 
+    }, (err, res) => {
+      setEnvLoading(false);
+      if (!err && res && res.body && res.body.status === 'ok') {
+        setEditingEnv(null);
+        fetchContainers();
+      } else {
+        alert('Failed to update ENV and restart: ' + (err?.message || 'unknown error'));
+      }
+    });
+  };
+
+  const renderEnvModal = () => {
+    if (!editingEnv) return null;
+
+    return (
+      <div className="chart-zoom-overlay" style={{ display: 'block' }}>
+        <div 
+          className={`chart-zoom-modal env-modal ${isEnvMaximized ? 'is-maximized' : ''}`}
+          onClick={e => e.stopPropagation()}
+          style={{
+            width: isEnvMaximized ? '100vw' : `${envModalSize.width}px`,
+            height: isEnvMaximized ? '100vh' : `${envModalSize.height}px`,
+            transform: isEnvMaximized ? 'none' : `translate(${envModalPos.x}px, ${envModalPos.y}px)`,
+            maxWidth: 'none',
+            position: 'fixed',
+            left: 0,
+            top: 0,
+            margin: 0
+          }}
+        >
+          {/* Resize Handles - only when not maximized */}
+          {!isEnvMaximized && (
+            <>
+              <div className="modal-resizer r" onMouseDown={e => handleEnvResizeDown(e, 'r')} />
+              <div className="modal-resizer b" onMouseDown={e => handleEnvResizeDown(e, 'b')} />
+              <div className="modal-resizer l" onMouseDown={e => handleEnvResizeDown(e, 'l')} />
+              <div className="modal-resizer t" onMouseDown={e => handleEnvResizeDown(e, 't')} />
+              <div className="modal-resizer rb" onMouseDown={e => handleEnvResizeDown(e, 'rb')} />
+              <div className="modal-resizer lb" onMouseDown={e => handleEnvResizeDown(e, 'lb')} />
+              <div className="modal-resizer rt" onMouseDown={e => handleEnvResizeDown(e, 'rt')} />
+              <div className="modal-resizer lt" onMouseDown={e => handleEnvResizeDown(e, 'lt')} />
+            </>
+          )}
+
+          <div 
+            className="chart-zoom-header" 
+            onMouseDown={handleEnvMouseDown} 
+            onDoubleClick={handleEnvTitleDoubleClick}
+            style={{ cursor: 'move' }}
+          >
+            <h3>Environment Variables: {editingEnv.name}</h3>
+            <button className="close-zoom-btn no-drag" onClick={() => setEditingEnv(null)}>×</button>
+          </div>
+          <div className="chart-zoom-body">
+            <div className="env-list no-drag">
+              {editingEnv.env.map((envStr, index) => {
+                const eqIdx = envStr.indexOf('=');
+                const key = eqIdx > -1 ? envStr.substring(0, eqIdx) : envStr;
+                const value = eqIdx > -1 ? envStr.substring(eqIdx + 1) : '';
+                return (
+                  <div key={index} className="env-item no-drag">
+                    <input 
+                      type="text" 
+                      value={key} 
+                      onChange={(e) => {
+                        const newEnv = [...editingEnv.env];
+                        newEnv[index] = e.target.value + '=' + value;
+                        setEditingEnv({...editingEnv, env: newEnv});
+                      }}
+                      placeholder="KEY"
+                      className="no-drag"
+                    />
+                    <span className="no-drag">=</span>
+                    <input 
+                      type="text" 
+                      value={value} 
+                      onChange={(e) => {
+                        const newEnv = [...editingEnv.env];
+                        newEnv[index] = key + '=' + e.target.value;
+                        setEditingEnv({...editingEnv, env: newEnv});
+                      }}
+                      placeholder="VALUE"
+                      className="no-drag"
+                    />
+                    <button className="delete-env-btn no-drag" onClick={() => {
+                      const newEnv = editingEnv.env.filter((_, i) => i !== index);
+                      setEditingEnv({...editingEnv, env: newEnv});
+                    }}>×</button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div className="chart-zoom-footer no-drag">
+            <button className="add-env-btn no-drag" onClick={() => {
+              setEditingEnv({...editingEnv, env: [...editingEnv.env, 'NEW_VAR=']});
+            }}>+ Add Variable</button>
+            <div style={{ flex: 1 }}></div>
+            <button className="add-env-btn no-drag" onClick={() => setEditingEnv(null)}>Cancel</button>
+            <button onClick={handleSaveEnv} className="download-button no-drag" disabled={envLoading}>
+              {envLoading ? 'Updating...' : 'Save & Restart'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const formatBytes = (bytes) => {
     if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
@@ -374,7 +616,7 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
                     <td>{name}</td>
                     <td>{c.State}</td>
                     <td>{calculateCpu(s)}</td>
-                    <td>{s ? formatBytes(s.memory_stats.usage) : '-'}</td>
+                    <td>{s && s.memory_stats ? formatBytes(s.memory_stats.usage) : '-'}</td>
                     <td className="chart-td">
                       <ContainerChart 
                         data={chartData[c.Id]} 
@@ -383,12 +625,13 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
                       />
                     </td>
                     <td>
-                      {s ? `${s.cpu_stats.online_cpus || '-'} CPU / ${formatBytes(s.memory_stats.limit)}` : '-'}
+                      {s && s.cpu_stats && s.memory_stats ? `${s.cpu_stats.online_cpus || '-'} CPU / ${formatBytes(s.memory_stats.limit)}` : '-'}
                     </td>
                     <td className="docker-actions">
                       <button onClick={() => onOpenTerminal(name, c.Id)} title="Terminal">T</button>
                       <button onClick={() => toggleLogs(c.Id)} title="Logs" className={isExpanded ? 'active' : ''}>L</button>
                       <button onClick={() => handleRestart(c.Id)} title="Restart">R</button>
+                      <button onClick={() => handleOpenEnv(c.Id)} title="Environment Variables">ENV</button>
                     </td>
                   </tr>
                   {isExpanded && (
@@ -437,6 +680,7 @@ const DockerView = ({ sessionId, userId, onOpenTerminal, status, onRestore, serv
         </table>
       )}
       {renderZoomModal()}
+      {renderEnvModal()}
     </div>
   );
 };

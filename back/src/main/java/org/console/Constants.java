@@ -34,6 +34,8 @@ public class Constants {
     public static final String DOCKER_CONTAINER_STATS = "docker.container.stats";
     public static final String DOCKER_CONTAINER_RESTART = "docker.container.restart";
     public static final String DOCKER_CONTAINER_LOGS = "docker.container.logs";
+    public static final String DOCKER_CONTAINER_INSPECT = "docker.container.inspect";
+    public static final String DOCKER_CONTAINER_UPDATE_ENV = "docker.container.update_env";
 
     public static final String FILES_PREFIX = "files.";
     public static final String FILES_LIST = "files.list";
