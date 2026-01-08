@@ -677,9 +677,77 @@ html, body, #root {
 
 /* SshTerminal styles */
 .ssh-terminal-container {
+  display: flex;
+  flex-direction: column;
   height: 100%;
-  padding: 5px;
   box-sizing: border-box;
+}
+
+.ssh-terminal-workspace {
+  flex: 1;
+  min-height: 0;
+  padding: 5px;
+}
+
+.ssh-terminal-status-bar {
+  height: 30px;
+  background: #2d2d2d;
+  border-top: 1px solid #444;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 12px;
+  color: #ccc;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.status-bar-label {
+  white-space: nowrap;
+  color: #888;
+}
+
+.status-bar-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #00ff00;
+  outline: none;
+  font-family: monospace;
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.status-bar-input::placeholder {
+  color: #555;
+  font-style: italic;
+}
+
+.status-bar-button {
+  background: #3c3c3c;
+  border: 1px solid #555;
+  color: #ccc;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: bold;
+  transition: all 0.2s;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.status-bar-button:hover {
+  background: #007acc;
+  color: white;
+  border-color: #007acc;
+}
+
+.status-bar-button:active {
+  background: #005a9e;
 }
 
 .terminal-header-center {

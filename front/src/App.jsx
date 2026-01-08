@@ -1372,6 +1372,7 @@ function App() {
             ) : (
                 <SshTerminal 
                     sessionId={detachedSessionId} 
+                    serverId={detachedServerId}
                     userId={userId} 
                     status="connected" 
                     onRestore={() => restoreSession(detachedSessionId)}
@@ -1667,7 +1668,13 @@ function App() {
                                 setShowTasks={setShowTasks} 
                             />
                           ) : (
-                            <SshTerminal sessionId={tab.id} userId={userId} status={tab.status} onRestore={() => restoreSession(tab.id)} />
+                            <SshTerminal 
+                                sessionId={tab.id} 
+                                serverId={tab.serverId}
+                                userId={userId} 
+                                status={tab.status} 
+                                onRestore={() => restoreSession(tab.id)} 
+                            />
                           )}
                         </div>
                         {tab.status === 'restorable' && tab.viewMode !== 'docker' && tab.viewMode !== 'files' && (

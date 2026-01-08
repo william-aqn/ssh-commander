@@ -1,14 +1,70 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { eb, subscribeEb, EventBus, registerHandler } from '../services/eventBus';
 
-const SshTerminal = ({ sessionId, userId, status, onRestore }) => {
+const SshTerminal = ({ sessionId, serverId, userId, status, onRestore }) => {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const fitAddonRef = useRef(null);
+  const [comment, setComment] = useState('');
 
+  useEffect(() => {
+    if (!serverId) return;
+
+    const fetchComment = () => {
+        eb.send('server.comment.get', { serverId }, (err, res) => {
+            if (!err && res && res.body) {
+                setComment(res.body.comment || '');
+            }
+        });
+    };
+
+    if (eb.state === EventBus.OPEN) {
+        fetchComment();
+    }
+    const unsubOpen = subscribeEb('open', fetchComment);
+
+    const unregisterNotify = registerHandler('server.comment.notify', (err, msg) => {
+      if (msg && msg.body && msg.body.serverId === serverId) {
+        setComment(msg.body.comment || '');
+      }
+    });
+
+    return () => {
+      unsubOpen();
+      unregisterNotify();
+    };
+  }, [serverId]);
+
+  const handleCommentChange = (e) => {
+    const val = e.target.value.substring(0, 250);
+    setComment(val);
+    if (eb.state === EventBus.OPEN) {
+        eb.send('server.comment.set', { serverId, comment: val });
+    }
+  };
+
+  const handleMotdUpdate = () => {
+    if (!comment.trim()) {
+        if (!window.confirm('Очистить комментарий?')) {
+            return;
+        }
+    } else if (!window.confirm('Обновить MOTD на сервере, используя текущий комментарий?')) {
+        return;
+    }
+
+    if (eb.state === EventBus.OPEN) {
+            eb.send('server.motd.set', { serverId, comment, sessionId }, (err, res) => {
+                if (err) {
+                    alert('Ошибка при обновлении MOTD: ' + (err.message || 'неизвестная ошибка'));
+                }
+            });
+        } else {
+            alert('EventBus не подключен');
+        }
+  };
 
   useEffect(() => {
     if (!userId || status !== 'connected') return;
@@ -26,9 +82,21 @@ const SshTerminal = ({ sessionId, userId, status, onRestore }) => {
     term.attachCustomKeyEventHandler((event) => {
       if (event.ctrlKey && event.code === 'KeyW' && event.type === 'keydown') {
         event.preventDefault();
+        event.stopPropagation();
+        
+        const msg = { sessionId, data: '\x17', userId };
         if (eb.state === EventBus.OPEN) {
-          eb.publish('ssh.command.in', { sessionId, data: '\x17' });
+          eb.publish('ssh.command.in', msg);
         }
+        
+        // Повторная отправка через небольшую задержку для надежности,
+        // так как браузер может блокировать сокет в момент вызова алертов закрытия.
+        setTimeout(() => {
+          if (eb.state === EventBus.OPEN) {
+            eb.publish('ssh.command.in', msg);
+          }
+        }, 50);
+
         return false;
       }
       return true;
@@ -80,7 +148,29 @@ const SshTerminal = ({ sessionId, userId, status, onRestore }) => {
     };
   }, [sessionId, userId, status]);
 
-  return <div ref={terminalRef} className="ssh-terminal-container" />;
+  return (
+    <div className="ssh-terminal-container">
+      <div ref={terminalRef} className="ssh-terminal-workspace" />
+      <div className="ssh-terminal-status-bar">
+        <span className="status-bar-label">Server Comment:</span>
+        <input 
+          type="text" 
+          className="status-bar-input" 
+          value={comment} 
+          onChange={handleCommentChange}
+          placeholder="Enter comment (max 250 chars)..."
+          maxLength={250}
+        />
+        <button 
+          className="status-bar-button" 
+          onClick={handleMotdUpdate} 
+          title="Set as Server MOTD"
+        >
+          MOTD
+        </button>
+      </div>
+    </div>
+  );
 };
 
 export default SshTerminal;

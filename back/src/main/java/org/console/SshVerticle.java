@@ -149,6 +149,121 @@ public class SshVerticle extends AbstractVerticle {
             message.reply(list);
         });
 
+        // Получение комментария к серверу
+        vertx.eventBus().<JsonObject>consumer(SERVER_COMMENT_GET, message -> {
+            JsonObject body = message.body();
+            String serverId = body.getString("serverId");
+            if (serverId == null) {
+                message.fail(400, "serverId is missing");
+                return;
+            }
+
+            redis.send(Request.cmd(Command.GET).arg("ssh:server:comment:" + serverId))
+                .onSuccess(res -> {
+                    String comment = res != null ? res.toString() : "";
+                    message.reply(new JsonObject().put("serverId", serverId).put("comment", comment));
+                })
+                .onFailure(err -> {
+                    logger.error("Failed to get comment from redis", err);
+                    message.fail(500, err.getMessage());
+                });
+        });
+
+        // Установка комментария к серверу
+        vertx.eventBus().<JsonObject>consumer(SERVER_COMMENT_SET, message -> {
+            JsonObject body = message.body();
+            String serverId = body.getString("serverId");
+            String comment = body.getString("comment");
+
+            if (serverId == null) {
+                message.fail(400, "serverId is missing");
+                return;
+            }
+
+            if (comment != null && comment.length() > 250) {
+                message.fail(400, "Comment is too long");
+                return;
+            }
+
+            String finalComment = comment != null ? comment : "";
+
+            redis.send(Request.cmd(Command.SET).arg("ssh:server:comment:" + serverId).arg(finalComment))
+                .onSuccess(res -> {
+                    JsonObject notifyMsg = new JsonObject()
+                        .put("serverId", serverId)
+                        .put("comment", finalComment);
+                    vertx.eventBus().publish(SERVER_COMMENT_NOTIFY, notifyMsg);
+                    message.reply(new JsonObject().put("status", "ok"));
+                })
+                .onFailure(err -> {
+                    logger.error("Failed to set comment in redis", err);
+                    message.fail(500, err.getMessage());
+                });
+        });
+
+        // Установка MOTD на сервере
+        vertx.eventBus().<JsonObject>consumer(SERVER_MOTD_SET, message -> {
+            JsonObject body = message.body();
+            String serverId = body.getString("serverId");
+            String comment = body.getString("comment");
+            String userId = body.getString(SESSION_USER_ID);
+            String sessionId = body.getString("sessionId");
+
+            if (serverId == null || comment == null || userId == null) {
+                message.fail(400, "Missing parameters");
+                return;
+            }
+
+            Session jschSession = getAnyActiveJschSession(serverId);
+            if (jschSession == null) {
+                message.fail(503, "SSH session not active. Connect to server first.");
+                return;
+            }
+
+            String startMarker = "###SSH-COMMENT-START###";
+            String endMarker = "###SSH-COMMENT-END###";
+            String s = ShellUtils.sanitize(startMarker);
+            String e = ShellUtils.sanitize(endMarker);
+            String c = ShellUtils.sanitize(comment);
+
+            String command;
+            if (comment.isEmpty()) {
+                command = String.format(
+                    "f=/etc/motd; s=%1$s; e=%2$s; " +
+                    "(sudo touch \"$f\" || touch \"$f\") && " +
+                    "(sudo sed -i \"/$s/,/$e/d\" \"$f\" || sed -i \"/$s/,/$e/d\" \"$f\")",
+                    s, e
+                );
+            } else {
+                command = String.format(
+                    "f=/etc/motd; s=%1$s; e=%2$s; c=%3$s; " +
+                    "(sudo touch \"$f\" || touch \"$f\") && " +
+                    "(sudo sed -i \"/$s/,/$e/d\" \"$f\" || sed -i \"/$s/,/$e/d\" \"$f\") && " +
+                    "(printf \"\\n%%s\\n%%s\\n%%s\\n\" \"$s\" \"$c\" \"$e\" | sudo tee -a \"$f\" > /dev/null || " +
+                    "printf \"\\n%%s\\n%%s\\n%%s\\n\" \"$s\" \"$c\" \"$e\" | tee -a \"$f\" > /dev/null)",
+                    s, e, c
+                );
+            }
+
+            executeCommand(jschSession, command)
+                .onSuccess(output -> {
+                    message.reply(new JsonObject().put("status", "ok"));
+                    if (sessionId != null) {
+                        SshSession sessionToClose = sessions.get(sessionId);
+                        if (sessionToClose != null && userId.equals(sessionToClose.userId)) {
+                            logger.info("Reconnecting session {} after MOTD update", sessionId);
+                            sessions.remove(sessionId);
+                            closeSshSession(sessionToClose);
+                            notifySessionTerminated(userId, sessionId, false);
+                        }
+                    }
+                })
+                .onFailure(err -> {
+                    logger.error("Failed to update MOTD on server", err);
+                    message.fail(500, "Failed to update MOTD: " + err.getMessage());
+                });
+        });
+
         // Создание сессии
         vertx.eventBus().<JsonObject>consumer(SSH_SESSION_CREATE, message -> {
             Object bodyObj = message.body();

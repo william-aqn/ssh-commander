@@ -73,7 +73,12 @@ public class MainVerticle extends AbstractVerticle {
             .addInboundPermitted(new PermittedOptions().setAddressRegex(SSH_SERVERS_NOTIFY_PREFIX.replace(".", "\\.") + ".*"))
             .addInboundPermitted(new PermittedOptions().setAddressRegex(DOCKER_PREFIX.replace(".", "\\.") + ".*"))
             .addInboundPermitted(new PermittedOptions().setAddressRegex(FILES_PREFIX.replace(".", "\\.") + ".*"))
-            .addOutboundPermitted(new PermittedOptions().setAddressRegex(SSH_COMMAND_OUT_PREFIX.replace(".", "\\.") + ".*"));
+            .addInboundPermitted(new PermittedOptions().setAddress(SERVER_COMMENT_GET))
+            .addInboundPermitted(new PermittedOptions().setAddress(SERVER_COMMENT_SET))
+            .addInboundPermitted(new PermittedOptions().setAddress(SERVER_MOTD_SET))
+            .addOutboundPermitted(new PermittedOptions().setAddressRegex(SSH_COMMAND_OUT_PREFIX.replace(".", "\\.") + ".*"))
+            .addOutboundPermitted(new PermittedOptions().setAddress(SERVER_COMMENT_NOTIFY))
+            .addOutboundPermitted(new PermittedOptions().setAddress(SERVER_MOTD_NOTIFY));
 
         router.route("/eventbus/*").subRouter(SockJSHandler.create(vertx).bridge(options, this::handleBridgeEvent));
 

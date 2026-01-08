@@ -23,6 +23,12 @@ public class Constants {
     public static final String SSH_SESSION_LIST = "ssh.session.list";
     public static final String SSH_SESSION_REORDERED_SUFFIX = ".ssh.session.reordered";
 
+    public static final String SERVER_COMMENT_GET = "server.comment.get";
+    public static final String SERVER_COMMENT_SET = "server.comment.set";
+    public static final String SERVER_COMMENT_NOTIFY = "server.comment.notify";
+    public static final String SERVER_MOTD_SET = "server.motd.set";
+    public static final String SERVER_MOTD_NOTIFY = "server.motd.notify";
+
     public static final String DOCKER_PREFIX = "docker.";
     public static final String DOCKER_CONTAINERS_LIST = "docker.containers.list";
     public static final String DOCKER_CONTAINER_STATS = "docker.container.stats";
